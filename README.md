@@ -15,16 +15,20 @@ coding agent
   -> your app
 ```
 
-## Install In Claude Code
+## Install + Verify
 
-Add the MCP server at user scope so it is available from any project:
+### Claude Code
+
+Paste this into a terminal:
 
 ```bash
+claude mcp remove mcp-debugger -s local 2>/dev/null || true
+claude mcp remove mcp-debugger -s user 2>/dev/null || true
 claude mcp add -s user mcp-debugger -- npx -y github:illscience/mcp-debugger
 claude mcp get mcp-debugger
 ```
 
-Expected:
+You want to see:
 
 ```text
 Status: ✓ Connected
@@ -32,24 +36,22 @@ Type: stdio
 Command: npx
 ```
 
-If you tried an older install and Claude shows a broken local server such as `Command: mcp-debugger-server`, remove the local entry and add it again:
-
-```bash
-claude mcp remove mcp-debugger -s local 2>/dev/null || true
-claude mcp remove mcp-debugger -s user 2>/dev/null || true
-claude mcp add -s user mcp-debugger -- npx -y github:illscience/mcp-debugger
-```
+The remove commands are intentional. They clear old local or user entries that may point at a stale executable such as `mcp-debugger-server`.
 
 Claude Code loads project instructions from `./CLAUDE.md` ([Anthropic docs](https://docs.anthropic.com/en/docs/claude-code/memory)). `mcp-debugger` can create that file for you in a test project; see the clean-room test below.
 
-## Install In Codex
+### Codex
+
+Paste this into a terminal:
 
 ```bash
+codex mcp remove mcp_debugger 2>/dev/null || true
+codex mcp remove codex-debugger 2>/dev/null || true
 codex mcp add mcp_debugger -- npx -y github:illscience/mcp-debugger
-codex mcp list
+codex mcp get mcp_debugger
 ```
 
-Codex's MCP config table names are safest with underscores, so the Codex config entry is `mcp_debugger` even though the project and MCP server identify as `mcp-debugger`.
+Codex's MCP config table names are safest with underscores, so the Codex config entry is `mcp_debugger` even though the project and MCP server identify as `mcp-debugger`. The `codex-debugger` remove command clears the old project name if you tried an earlier version.
 
 Then start a fresh Codex session and ask it to debug a reproducible bug:
 
@@ -91,40 +93,34 @@ npx -y @illscience/mcp-debugger
 
 This is the fastest way to prove the MCP works the way people will actually use it: from a normal bug-fixing prompt, not from a Python test script and not by explicitly telling the agent which debugger tool to call.
 
-First make sure Claude Code has the MCP server registered at user scope:
+For Claude Code, paste this whole block:
 
 ```bash
+# Install or reset the MCP server at user scope.
+claude mcp remove mcp-debugger -s local 2>/dev/null || true
+claude mcp remove mcp-debugger -s user 2>/dev/null || true
+claude mcp add -s user mcp-debugger -- npx -y github:illscience/mcp-debugger
 claude mcp get mcp-debugger
-```
 
-Start in a fresh directory and create the demo files before asking Claude to debug them:
-
-```bash
+# Create a fresh demo project.
+rm -rf /tmp/mcp-debugger-cleanroom
 mkdir /tmp/mcp-debugger-cleanroom
 cd /tmp/mcp-debugger-cleanroom
 npx -y github:illscience/mcp-debugger demo-project --target claude .
 ls
-```
 
-That creates:
-
-- `buggy_invoice.py`: a tiny Python program with a real arithmetic bug.
-- `CLAUDE.md`: Claude Code project memory that says to use live runtime debugging when a Python bug is reproducible.
-
-Run a natural prompt:
-
-```bash
+# Ask a normal debugging question.
 claude -p "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files."
-```
 
-If Claude says the directory is empty, the demo project was not created in the directory where you ran Claude. Run `pwd` and `ls`; `buggy_invoice.py` and `CLAUDE.md` should both be present before the prompt.
-
-To prove from the transcript that Claude used the MCP debugger, run the same prompt in stream-json mode:
-
-```bash
+# Optional: save a transcript and grep for MCP/debugger evidence.
 claude -p --output-format stream-json --verbose "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files." | tee /tmp/mcp-debugger-claude.jsonl
 grep -E "mcp__mcp-debugger|debug_python_repro|mcp-debugger" /tmp/mcp-debugger-claude.jsonl
 ```
+
+The `demo-project` command creates:
+
+- `buggy_invoice.py`: a tiny Python program with a real arithmetic bug.
+- `CLAUDE.md`: Claude Code project memory that says to use live runtime debugging when a reproducible bug has observable runtime state.
 
 You should see `mcp-debugger` listed as connected and, on a successful debugger-assisted run, a tool call such as `mcp__mcp-debugger__debug_python_repro`.
 
@@ -138,6 +134,12 @@ What you want to see:
 You can run the same clean-room prompt test with Codex:
 
 ```bash
+codex mcp remove mcp_debugger 2>/dev/null || true
+codex mcp remove codex-debugger 2>/dev/null || true
+codex mcp add mcp_debugger -- npx -y github:illscience/mcp-debugger
+codex mcp get mcp_debugger
+
+rm -rf /tmp/mcp-debugger-codex
 mkdir /tmp/mcp-debugger-codex
 cd /tmp/mcp-debugger-codex
 npx -y github:illscience/mcp-debugger demo-project --target codex .
