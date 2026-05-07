@@ -100,13 +100,34 @@ Use the mcp-debugger MCP tools to debug examples/buggy_discount.py. Start with d
 If installed with `pipx`:
 
 ```bash
-claude mcp add mcp-debugger -- mcp-debugger-server
+claude mcp add -s user mcp-debugger -- mcp-debugger-server
 ```
 
 Or print the command:
 
 ```bash
 mcp-debugger install-snippet claude
+```
+
+Confirm Claude Code can connect:
+
+```bash
+claude mcp get mcp-debugger
+```
+
+Expected:
+
+```text
+Status: ✓ Connected
+Type: stdio
+```
+
+The `-s user` scope is intentional: it makes the MCP server available from fresh project directories. If you omit it, Claude Code defaults to local scope and the server is only available from the directory where you added it.
+
+Claude Code loads project instructions from `./CLAUDE.md` ([Anthropic docs](https://docs.anthropic.com/en/docs/claude-code/memory)). `mcp-debugger` can create that file for you in a test project:
+
+```bash
+mcp-debugger init-agent-files --target claude
 ```
 
 ## Generic MCP Config
@@ -128,6 +149,56 @@ Print an environment-specific JSON snippet:
 ```bash
 mcp-debugger install-snippet json
 ```
+
+## Clean-Room Prompt Test
+
+This is the fastest way to prove the MCP works the way people will actually use it: from a normal bug-fixing prompt, not from a Python test script and not by explicitly telling the agent which debugger tool to call.
+
+Start in a fresh directory after installing the MCP:
+
+```bash
+mkdir /tmp/mcp-debugger-cleanroom
+cd /tmp/mcp-debugger-cleanroom
+mcp-debugger demo-project --target claude .
+```
+
+That creates:
+
+- `buggy_invoice.py`: a tiny Python program with a real arithmetic bug.
+- `CLAUDE.md`: Claude Code project memory that says to use live runtime debugging when a Python bug is reproducible.
+
+Run a natural prompt:
+
+```bash
+claude -p "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files."
+```
+
+To prove from the transcript that Claude used the MCP debugger, run the same prompt in stream-json mode:
+
+```bash
+claude -p --output-format stream-json --verbose "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files." | tee /tmp/mcp-debugger-claude.jsonl
+grep -E "mcp__mcp-debugger|debug_python_repro|mcp-debugger" /tmp/mcp-debugger-claude.jsonl
+```
+
+You should see `mcp-debugger` listed as connected and, on a successful debugger-assisted run, a tool call such as `mcp__mcp-debugger__debug_python_repro`.
+
+What you want to see:
+
+- Claude calls the `mcp-debugger` MCP server, usually starting with `debug_python_repro`.
+- Claude reports runtime values such as `subtotal = 120.0`, `customer_tier = 'gold'`, and `rate = 0.15`.
+- Claude explains that the program subtracts `0.15` directly instead of subtracting `120.0 * 0.15`.
+- Claude proposes `total = subtotal * (1 - rate)` or `total = subtotal - (subtotal * rate)`.
+
+You can run the same clean-room prompt test with Codex:
+
+```bash
+mkdir /tmp/mcp-debugger-codex
+cd /tmp/mcp-debugger-codex
+mcp-debugger demo-project --target codex .
+codex exec "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files."
+```
+
+The key proof is the transcript: the agent should use debugger tools from a normal debugging request and cite observed runtime state in its answer.
 
 ## What The Agent Sees
 
@@ -151,9 +222,9 @@ Debugger primitives:
 - `debug_evaluate`: evaluate an expression in a paused frame.
 - `debug_stop`: disconnect and clean up a session.
 
-## Runtime Proof
+## Scripted Runtime Proof
 
-Run the end-to-end proof:
+The repository also includes a deterministic proof script for CI and development:
 
 ```bash
 python tools/runtime_proof.py
@@ -225,16 +296,31 @@ The correct total is 102.0, not 119.85.
 
 ## How To Make Agents Use It Naturally
 
-Copy this repo's [`AGENTS.md`](AGENTS.md) guidance into the target project, or print the guidance with:
+MCP makes the debugger available, but the agent still needs a workflow preference that says runtime bugs should be investigated with live runtime state when possible.
+
+For Claude Code, use `CLAUDE.md`. Anthropic documents `./CLAUDE.md` as project memory that Claude Code loads automatically.
+
+For Codex, use `AGENTS.md`.
+
+Create the right file in a target project:
 
 ```bash
-mcp-debugger agent-instructions
+mcp-debugger init-agent-files --target claude
+mcp-debugger init-agent-files --target codex
+mcp-debugger init-agent-files --target both
+```
+
+Or print the guidance:
+
+```bash
+mcp-debugger agent-instructions --target claude
+mcp-debugger agent-instructions --target codex
 ```
 
 The key instruction:
 
 ```text
-When debugging Python runtime bugs, prefer observing live state with mcp-debugger instead of guessing from source alone.
+When a Python bug has a reproducible script, test, command, or request, prefer observing live runtime state before proposing a fix.
 ```
 
 The high-level `debug_python_repro` tool is intentionally named and described so agents can pick it before reaching for raw debugger operations.
