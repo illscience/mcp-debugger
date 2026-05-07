@@ -77,7 +77,7 @@ def _doctor() -> int:
 def _print_install(target: str) -> int:
     command = _mcp_command()
     if target == "codex":
-        print(f"codex mcp add mcp-debugger -- {command}")
+        print(f"codex mcp add mcp_debugger -- {command}")
     elif target == "claude":
         print(f"claude mcp add mcp-debugger -- {command}")
     else:

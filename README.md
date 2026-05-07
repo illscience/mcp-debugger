@@ -60,14 +60,16 @@ Expected result:
 If installed with `pipx`:
 
 ```bash
-codex mcp add mcp-debugger -- mcp-debugger-server
+codex mcp add mcp_debugger -- mcp-debugger-server
 ```
 
 If running from a local checkout:
 
 ```bash
-codex mcp add mcp-debugger -- /absolute/path/to/mcp-debugger/.venv/bin/mcp-debugger-server
+codex mcp add mcp_debugger -- /absolute/path/to/mcp-debugger/.venv/bin/mcp-debugger-server
 ```
+
+Codex's MCP config table names are safest with underscores, so the Codex config entry is `mcp_debugger` even though the project, package, and MCP server identify as `mcp-debugger`.
 
 You can print the exact command for your environment:
 
