@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include AGENTS.md
+recursive-include examples *.py
+recursive-include tests *.py
+recursive-include tools *.py
