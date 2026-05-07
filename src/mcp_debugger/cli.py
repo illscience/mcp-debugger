@@ -12,14 +12,14 @@ from .agent_guidance import AGENT_USAGE_GUIDANCE
 
 
 def _mcp_command() -> str:
-    command = shutil.which("codex-debugger-mcp")
+    command = shutil.which("mcp-debugger-server")
     if command:
         return command
     for directory in (Path(sys.prefix) / "bin", Path(sys.executable).parent):
-        sibling = directory / "codex-debugger-mcp"
+        sibling = directory / "mcp-debugger-server"
         if sibling.exists():
             return str(sibling)
-    return "codex-debugger-mcp"
+    return "mcp-debugger-server"
 
 
 def _doctor() -> int:
@@ -50,7 +50,7 @@ def _doctor() -> int:
             timeout=10,
             check=False,
         )
-        ok = process.returncode == 0 and '"name":"codex-debugger"' in process.stdout
+        ok = process.returncode == 0 and '"name":"mcp-debugger"' in process.stdout
         checks.append(
             {
                 "name": "MCP initialize",
@@ -64,7 +64,7 @@ def _doctor() -> int:
         checks.append({"name": "MCP initialize", "ok": False, "command": command, "error": str(exc)})
 
     report = {
-        "name": "codex-debugger",
+        "name": "mcp-debugger",
         "version": __version__,
         "python": sys.executable,
         "checks": checks,
@@ -77,15 +77,15 @@ def _doctor() -> int:
 def _print_install(target: str) -> int:
     command = _mcp_command()
     if target == "codex":
-        print(f"codex mcp add codex-debugger -- {command}")
+        print(f"codex mcp add mcp-debugger -- {command}")
     elif target == "claude":
-        print(f"claude mcp add codex-debugger -- {command}")
+        print(f"claude mcp add mcp-debugger -- {command}")
     else:
         print(
             json.dumps(
                 {
                     "mcpServers": {
-                        "codex-debugger": {
+                        "mcp-debugger": {
                             "command": command,
                             "args": [],
                             "env": {},
@@ -99,8 +99,8 @@ def _print_install(target: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Utilities for the codex-debugger MCP server.")
-    parser.add_argument("--version", action="version", version=f"codex-debugger {__version__}")
+    parser = argparse.ArgumentParser(description="Utilities for the mcp-debugger MCP server.")
+    parser.add_argument("--version", action="version", version=f"mcp-debugger {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("doctor", help="Verify debugpy and the MCP server entry point.")

@@ -20,7 +20,7 @@ class MCPClient:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "codex_debugger.mcp_server"],
+            [sys.executable, "-m", "mcp_debugger.mcp_server"],
             cwd=ROOT,
             env=env,
             stdin=subprocess.PIPE,
@@ -128,7 +128,7 @@ def main() -> int:
     session_id: str | None = None
     try:
         init = client.request("initialize", {"protocolVersion": "2025-06-18"})
-        assert init["serverInfo"]["name"] == "codex-debugger"
+        assert init["serverInfo"]["name"] == "mcp-debugger"
         client.notify("notifications/initialized")
 
         tools = client.request("tools/list")

@@ -1,6 +1,6 @@
-# Codex Debugger Agent Guidance
+# MCP Debugger Agent Guidance
 
-When debugging Python runtime bugs, prefer observing live state with `codex-debugger` instead of guessing from source alone.
+When debugging Python runtime bugs, prefer observing live state with `mcp-debugger` instead of guessing from source alone.
 
 Use the MCP debugger when:
 - a Python script, test, command, or request reproduces the bug;

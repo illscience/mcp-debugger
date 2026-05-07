@@ -286,7 +286,7 @@ class MCPDebuggerServer:
                 {
                     "protocolVersion": requested_version or "2025-06-18",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "codex-debugger", "version": __version__},
+                    "serverInfo": {"name": "mcp-debugger", "version": __version__},
                 },
             )
 
@@ -469,7 +469,7 @@ def _tool_error(message: str, data: dict[str, Any] | None = None) -> dict[str, A
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the codex-debugger MCP server.")
+    parser = argparse.ArgumentParser(description="Run the mcp-debugger MCP server.")
     parser.parse_args(argv)
     MCPDebuggerServer().serve()
     return 0

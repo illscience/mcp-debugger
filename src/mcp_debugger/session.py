@@ -103,7 +103,7 @@ class DebugSession:
         session._initialize()
 
         launch_args: dict[str, Any] = {
-            "name": "codex-debugger",
+            "name": "mcp-debugger",
             "type": "python",
             "request": "launch",
             "program": program_path,
@@ -138,7 +138,7 @@ class DebugSession:
         )
         session._initialize()
         attach_args: dict[str, Any] = {
-            "name": "codex-debugger",
+            "name": "mcp-debugger",
             "type": "python",
             "request": "attach",
             "justMyCode": False,
@@ -370,8 +370,8 @@ class DebugSession:
         self.client.request(
             "initialize",
             {
-                "clientID": "codex-debugger",
-                "clientName": "Codex Debugger MCP",
+                "clientID": "mcp-debugger",
+                "clientName": "MCP Debugger MCP",
                 "adapterID": "python",
                 "pathFormat": "path",
                 "linesStartAt1": True,

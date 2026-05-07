@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-AGENT_USAGE_GUIDANCE = """Use codex-debugger when a Python bug has runtime behavior that static reading does not fully explain.
+AGENT_USAGE_GUIDANCE = """Use mcp-debugger when a Python bug has runtime behavior that static reading does not fully explain.
 
 Prefer debugger tools when:
 - a test, script, or command reproduces the bug;

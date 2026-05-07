@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from codex_debugger.mcp_server import MCPDebuggerServer
+from mcp_debugger.mcp_server import MCPDebuggerServer
 
 
 class MCPServerTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class MCPServerTests(unittest.TestCase):
                 "params": {"protocolVersion": "2025-06-18"},
             }
         )
-        self.assertEqual(initialize["result"]["serverInfo"]["name"], "codex-debugger")
+        self.assertEqual(initialize["result"]["serverInfo"]["name"], "mcp-debugger")
 
         listed = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = {tool["name"] for tool in listed["result"]["tools"]}

@@ -1,5 +1,5 @@
 [project]
-name = "codex-debugger"
+name = "mcp-debugger"
 version = "0.1.0"
 description = "An MCP debugger server that lets coding agents inspect live Python runtime state."
 readme = "README.md"
@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.scripts]
-codex-debugger = "codex_debugger.cli:main"
-codex-debugger-mcp = "codex_debugger.mcp_server:main"
+mcp-debugger = "mcp_debugger.cli:main"
+mcp-debugger-server = "mcp_debugger.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
