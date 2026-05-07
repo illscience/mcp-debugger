@@ -1,6 +1,6 @@
 [project]
 name = "mcp-debugger"
-version = "0.1.0"
+version = "0.1.1"
 description = "A debugger MCP server that lets coding agents inspect live runtime state."
 readme = "README.md"
 requires-python = ">=3.10"

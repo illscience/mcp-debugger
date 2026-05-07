@@ -2,6 +2,7 @@
 "use strict";
 
 const childProcess = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -101,6 +102,45 @@ function sourcePath(sourceDir) {
   return path.join(sourceDir, "src");
 }
 
+function hashPath(hash, target, root) {
+  if (!fs.existsSync(target)) {
+    return;
+  }
+  const relative = path.relative(root, target);
+  const stat = fs.statSync(target);
+  if (stat.isDirectory()) {
+    hash.update(`dir:${relative}\n`);
+    for (const entry of fs.readdirSync(target).sort()) {
+      const child = path.join(target, entry);
+      if (shouldCopySource(child)) {
+        hashPath(hash, child, root);
+      }
+    }
+    return;
+  }
+  hash.update(`file:${relative}:${stat.size}\n`);
+  hash.update(fs.readFileSync(target));
+}
+
+function sourceFingerprint() {
+  const hash = crypto.createHash("sha256");
+  hash.update(`${packageJson.name}@${packageJson.version}\n`);
+  for (const name of [
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "MANIFEST.in",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "src",
+    "examples",
+    "tools",
+  ]) {
+    hashPath(hash, path.join(packageRoot, name), packageRoot);
+  }
+  return hash.digest("hex").slice(0, 12);
+}
+
 function shouldCopySource(source) {
   const name = path.basename(source);
   if (
@@ -152,7 +192,9 @@ function prepareInstallSource(sourceDir) {
 
 function ensureVenv() {
   const safeName = packageJson.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const venvDir = path.join(cacheRoot(), `${safeName}-${packageJson.version}`);
+  const fingerprint = sourceFingerprint();
+  const cacheKey = `${safeName}-${packageJson.version}-${fingerprint}`;
+  const venvDir = path.join(cacheRoot(), cacheKey);
   const sourceDir = path.join(venvDir, "package");
   const readyFile = path.join(venvDir, ".ready");
   const pythonPath = venvPython(venvDir);
@@ -178,7 +220,7 @@ function ensureVenv() {
     "Failed to install the Python debugger backend.",
   );
 
-  fs.writeFileSync(readyFile, `${packageJson.name}@${packageJson.version}\n`, "utf8");
+  fs.writeFileSync(readyFile, `${cacheKey}\n`, "utf8");
   return { pythonPath, sourceDir };
 }
 

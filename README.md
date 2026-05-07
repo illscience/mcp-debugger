@@ -36,8 +36,7 @@ npx -y github:illscience/mcp-debugger demo-project --target claude .
 ls
 
 # Verify from a normal prompt with readable live progress.
-claude -p --output-format stream-json --verbose "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files." \
-  | npx -y github:illscience/mcp-debugger claude-progress
+claude -p --output-format stream-json --verbose "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files." | npx -y github:illscience/mcp-debugger claude-progress
 ```
 
 Expected MCP install output includes:
@@ -136,9 +135,7 @@ npx -y github:illscience/mcp-debugger demo-project --target claude .
 ls
 
 # Ask a normal debugging question and show readable live progress.
-claude -p --output-format stream-json --verbose "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files." \
-  | tee /tmp/mcp-debugger-claude.jsonl \
-  | npx -y github:illscience/mcp-debugger claude-progress
+claude -p --output-format stream-json --verbose "There is a bug in buggy_invoice.py. Figure out what is wrong and propose the fix. Do not edit files." | tee /tmp/mcp-debugger-claude.jsonl | npx -y github:illscience/mcp-debugger claude-progress
 
 # Optional: grep the raw transcript for MCP/debugger evidence.
 grep -E "mcp__mcp-debugger|debug_python_repro|mcp-debugger" /tmp/mcp-debugger-claude.jsonl
