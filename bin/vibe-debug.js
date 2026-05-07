@@ -14,9 +14,6 @@ function cacheRoot() {
   if (process.env.VIBE_DEBUG_CACHE) {
     return process.env.VIBE_DEBUG_CACHE;
   }
-  if (process.env.MCP_DEBUGGER_CACHE) {
-    return process.env.MCP_DEBUGGER_CACHE;
-  }
   if (process.env.XDG_CACHE_HOME) {
     return path.join(process.env.XDG_CACHE_HOME, "vibe-debug");
   }
@@ -38,7 +35,7 @@ function runSetup(command, args, failureMessage) {
     encoding: "utf8",
   });
 
-  if (process.env.VIBE_DEBUG_VERBOSE_INSTALL || process.env.MCP_DEBUGGER_VERBOSE_INSTALL) {
+  if (process.env.VIBE_DEBUG_VERBOSE_INSTALL) {
     if (result.stdout) {
       process.stderr.write(result.stdout);
     }
@@ -60,7 +57,7 @@ function runSetup(command, args, failureMessage) {
 }
 
 function pythonCandidates() {
-  const configuredPython = process.env.VIBE_DEBUG_PYTHON || process.env.MCP_DEBUGGER_PYTHON;
+  const configuredPython = process.env.VIBE_DEBUG_PYTHON;
   if (configuredPython) {
     return [{ command: configuredPython, args: [] }];
   }
@@ -285,22 +282,21 @@ function main() {
   const { pythonPath, sourceDir } = ensureVenv();
   const pythonModulePath = sourcePath(sourceDir);
 
-  let moduleName = "mcp_debugger.mcp_server";
+  let moduleName = "vibe_debug.mcp_server";
   let moduleArgs = args;
 
   if (args.length > 0) {
     if (args[0] === "server" || args[0] === "mcp-server") {
       moduleArgs = args.slice(1);
     } else {
-      moduleName = "mcp_debugger.cli";
+      moduleName = "vibe_debug.cli";
     }
   }
 
   const env = {
     ...process.env,
     PYTHONPATH: [pythonModulePath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-    VIBE_DEBUG_SERVER_COMMAND_JSON: JSON.stringify([pythonPath, "-m", "mcp_debugger.mcp_server"]),
-    MCP_DEBUGGER_SERVER_COMMAND_JSON: JSON.stringify([pythonPath, "-m", "mcp_debugger.mcp_server"]),
+    VIBE_DEBUG_SERVER_COMMAND_JSON: JSON.stringify([pythonPath, "-m", "vibe_debug.mcp_server"]),
   };
 
   const child = childProcess.spawn(pythonPath, ["-m", moduleName, ...moduleArgs], {

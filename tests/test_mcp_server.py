@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from mcp_debugger.mcp_server import MCPDebuggerServer
+from vibe_debug.mcp_server import MCPDebuggerServer
 
 
 class MCPServerTests(unittest.TestCase):

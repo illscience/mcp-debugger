@@ -20,7 +20,7 @@ class MCPClient:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "mcp_debugger.mcp_server"],
+            [sys.executable, "-m", "vibe_debug.mcp_server"],
             cwd=ROOT,
             env=env,
             stdin=subprocess.PIPE,

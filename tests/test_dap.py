@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import unittest
 
-from mcp_debugger.dap import encode_dap_message, read_dap_message
+from vibe_debug.dap import encode_dap_message, read_dap_message
 
 
 class DAPFramingTests(unittest.TestCase):

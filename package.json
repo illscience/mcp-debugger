@@ -1,16 +1,15 @@
 {
   "name": "@illscience/vibe-debug",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Agent-friendly debugger CLI and MCP server.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {
-    "vibe-debug": "bin/vibe-debug.js",
-    "mcp-debugger": "bin/vibe-debug.js"
+    "vibe-debug": "bin/vibe-debug.js"
   },
   "files": [
     "bin/vibe-debug.js",
-    "src/mcp_debugger/*.py",
+    "src/vibe_debug/*.py",
     "pyproject.toml",
     "README.md",
     "LICENSE",

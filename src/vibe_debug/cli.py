@@ -14,9 +14,7 @@ from .session import DebugSession
 
 
 NPX_PACKAGE_SPEC = "github:illscience/vibe-debug"
-PRIMARY_MCP_SERVER_NAME = "vibe-debug"
-LEGACY_MCP_SERVER_NAME = "mcp-debugger"
-MCP_SERVER_NAMES = {PRIMARY_MCP_SERVER_NAME, LEGACY_MCP_SERVER_NAME}
+MCP_SERVER_NAME = "vibe-debug"
 
 
 DEMO_BUG = """def lookup_discount_rate(customer_tier):
@@ -92,7 +90,7 @@ Use the result to explain what the program actually did, not only what the sourc
 
 
 def _mcp_command() -> list[str]:
-    command_json = os.environ.get("VIBE_DEBUG_SERVER_COMMAND_JSON") or os.environ.get("MCP_DEBUGGER_SERVER_COMMAND_JSON")
+    command_json = os.environ.get("VIBE_DEBUG_SERVER_COMMAND_JSON")
     if command_json:
         try:
             command = json.loads(command_json)
@@ -102,15 +100,13 @@ def _mcp_command() -> list[str]:
             raise SystemExit("VIBE_DEBUG_SERVER_COMMAND_JSON must be a JSON array of strings.")
         return command
 
-    for command_name in ("vibe-debug-server", "mcp-debugger-server"):
-        command = shutil.which(command_name)
-        if command:
-            return [command]
+    command = shutil.which("vibe-debug-server")
+    if command:
+        return [command]
     for directory in (Path(sys.prefix) / "bin", Path(sys.executable).parent):
-        for command_name in ("vibe-debug-server", "mcp-debugger-server"):
-            sibling = directory / command_name
-            if sibling.exists():
-                return [str(sibling)]
+        sibling = directory / "vibe-debug-server"
+        if sibling.exists():
+            return [str(sibling)]
     return ["vibe-debug-server"]
 
 
@@ -549,15 +545,14 @@ def _load_json_maybe(value: object) -> object | None:
 
 
 def _debugger_tool_name(name: str) -> str:
-    for server_name in MCP_SERVER_NAMES:
-        prefix = f"mcp__{server_name}__"
-        if name.startswith(prefix):
-            return f"{server_name}.{name.removeprefix(prefix)}"
+    prefix = f"mcp__{MCP_SERVER_NAME}__"
+    if name.startswith(prefix):
+        return f"{MCP_SERVER_NAME}.{name.removeprefix(prefix)}"
     return name
 
 
 def _is_debugger_tool_name(name: str) -> bool:
-    return any(name.startswith(f"mcp__{server_name}__") for server_name in MCP_SERVER_NAMES)
+    return name.startswith(f"mcp__{MCP_SERVER_NAME}__")
 
 
 def _basename(path: object) -> str:
@@ -696,7 +691,7 @@ def _format_claude_stream(input_stream, output_stream) -> int:
             mcp_servers = event.get("mcp_servers")
             if isinstance(mcp_servers, list):
                 for server in mcp_servers:
-                    if not isinstance(server, dict) or server.get("name") not in MCP_SERVER_NAMES:
+                    if not isinstance(server, dict) or server.get("name") != MCP_SERVER_NAME:
                         continue
                     server_name = str(server.get("name"))
                     status = server.get("status")

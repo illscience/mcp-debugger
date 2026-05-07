@@ -58,7 +58,7 @@ npx -y github:illscience/vibe-debug doctor
 Expected output:
 
 ```text
-vibe-debug 0.2.0
+vibe-debug 0.2.1
 Python: ...
 debugpy import: ok
 MCP initialize: ok
@@ -72,9 +72,7 @@ MCP tools are visible to the agent while the server is enabled. If you only want
 
 ```bash
 claude mcp remove vibe-debug -s user
-claude mcp remove mcp-debugger -s user
 codex mcp remove vibe_debug
-codex mcp remove mcp_debugger
 ```
 
 ## Use Without MCP
@@ -150,8 +148,6 @@ If you previously installed an old version, reset first:
 ```bash
 claude mcp remove vibe-debug -s local 2>/dev/null || true
 claude mcp remove vibe-debug -s user 2>/dev/null || true
-claude mcp remove mcp-debugger -s local 2>/dev/null || true
-claude mcp remove mcp-debugger -s user 2>/dev/null || true
 ```
 
 The `demo-project` command creates:
@@ -189,8 +185,6 @@ If you previously tried an old version, reset first:
 
 ```bash
 codex mcp remove vibe_debug 2>/dev/null || true
-codex mcp remove mcp_debugger 2>/dev/null || true
-codex mcp remove codex-debugger 2>/dev/null || true
 ```
 
 The key proof is the transcript: the agent should use debugger tools from a normal debugging request and cite observed runtime state in its answer.

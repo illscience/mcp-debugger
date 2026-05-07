@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from mcp_debugger.cli import _format_claude_stream, main
+from vibe_debug.cli import _format_claude_stream, main
 
 
 def call_cli(args: list[str]) -> tuple[int, str]:
@@ -226,36 +226,6 @@ class CLITests(unittest.TestCase):
         self.assertIn("Stopped: buggy_invoice.py:13 in invoice_total", output)
         self.assertIn("Locals: subtotal=120.0 rate=0.15 total=119.85", output)
         self.assertIn("Eval: subtotal * (1 - rate) -> 102.0", output)
-
-    def test_claude_progress_accepts_legacy_mcp_debugger_name(self) -> None:
-        events = [
-            {
-                "type": "system",
-                "subtype": "init",
-                "cwd": "/tmp/demo",
-                "mcp_servers": [{"name": "mcp-debugger", "status": "connected"}],
-            },
-            {
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": "tool-1",
-                            "name": "mcp__mcp-debugger__debug_python_repro",
-                            "input": {"program": "/tmp/demo/buggy_invoice.py"},
-                        }
-                    ]
-                },
-            },
-        ]
-        input_stream = StringIO("\n".join(json.dumps(event) for event in events))
-        output_stream = StringIO()
-
-        self.assertEqual(_format_claude_stream(input_stream, output_stream), 0)
-        output = output_stream.getvalue()
-        self.assertIn("MCP: mcp-debugger connected", output)
-        self.assertIn("Tool: mcp-debugger.debug_python_repro (buggy_invoice.py)", output)
 
     def test_claude_progress_treats_pending_mcp_as_starting_until_tool_use(self) -> None:
         events = [
