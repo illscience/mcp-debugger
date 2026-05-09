@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -136,6 +137,74 @@ class CLITests(unittest.TestCase):
         self.assertIn("x = 41", output)
         self.assertIn("y = 42", output)
         self.assertIn("y -> 42", output)
+
+    def test_debug_pytest_stops_on_assertion_failure_json(self) -> None:
+        test_id = "examples/test_buggy_discount.py::test_gold"
+
+        code, output = call_cli(
+            [
+                "debug-pytest",
+                test_id,
+                "--python",
+                sys.executable,
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertEqual(payload["pytest"]["outcome"], "failed")
+        self.assertEqual(payload["pytest"]["test_id"], test_id)
+        self.assertEqual(payload["exception"]["name"], "AssertionError")
+        self.assertEqual(payload["stopped"]["reason"], "exception")
+        self.assertTrue(any(item["name"] == "price" for item in payload["locals"]))
+        self.assertTrue(any(item["name"] == "loyalty_level" for item in payload["locals"]))
+
+    def test_debug_pytest_breakpoint_and_pytest_arg(self) -> None:
+        test_file = Path("examples/test_buggy_discount.py")
+        breakpoint_line = next(
+            index for index, line in enumerate(test_file.read_text().splitlines(), start=1) if "actual =" in line
+        )
+
+        code, output = call_cli(
+            [
+                "debug-pytest",
+                str(test_file),
+                "--pytest-arg",
+                "-k",
+                "--pytest-arg",
+                "test_gold",
+                "--break",
+                f"{test_file}:{breakpoint_line}",
+                "--python",
+                sys.executable,
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertEqual(payload["stopped"]["reason"], "breakpoint")
+        self.assertEqual(payload["stopped"]["function"], "test_gold")
+        self.assertEqual(payload["pytest"]["pytest_args"], ["-k", "test_gold"])
+
+    def test_debug_pytest_no_break_on_failure_reports_failed_exit(self) -> None:
+        code, output = call_cli(
+            [
+                "debug-pytest",
+                "examples/test_buggy_discount.py::test_gold",
+                "--no-break-on-failure",
+                "--python",
+                sys.executable,
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertEqual(payload["pytest"]["outcome"], "failed")
+        self.assertEqual(payload["stopped"]["state"], "exited")
+        self.assertNotIn("exception", payload)
 
     def test_claude_progress_formats_debugger_events(self) -> None:
         events = [

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -399,6 +401,90 @@ def _local_summaries(snapshot: dict[str, object]) -> list[dict[str, object]]:
     return summaries
 
 
+def _exception_summary(exception_info: dict[str, object]) -> dict[str, object]:
+    exception_id = exception_info.get("exceptionId")
+    details = exception_info.get("details")
+    message = exception_info.get("description")
+    stack_trace = None
+
+    if isinstance(details, dict):
+        detail_message = details.get("message")
+        if isinstance(detail_message, str) and detail_message:
+            message = detail_message
+        detail_stack = details.get("stackTrace")
+        if isinstance(detail_stack, str) and detail_stack:
+            stack_trace = detail_stack
+
+    name = str(exception_id) if exception_id is not None else ""
+    if "." in name:
+        name = name.rsplit(".", 1)[-1]
+
+    summary: dict[str, object] = {
+        "name": name or "Exception",
+        "message": message if isinstance(message, str) else "",
+    }
+    if stack_trace:
+        summary["stackTrace"] = stack_trace
+    return summary
+
+
+def _pytest_outcome(stopped: dict[str, object], exception: dict[str, object] | None) -> str:
+    if exception and exception.get("name") == "AssertionError":
+        return "failed"
+
+    body = stopped.get("body")
+    exit_code = body.get("exitCode") if isinstance(body, dict) else None
+    if exit_code == 0:
+        return "passed"
+    if isinstance(exit_code, int):
+        return "failed"
+    if stopped.get("state") == "stopped":
+        return "stopped"
+    return str(stopped.get("state") or "unknown")
+
+
+def _pytest_args(values: list[str]) -> list[str]:
+    args: list[str] = []
+    for value in values:
+        args.extend(shlex.split(value))
+    return args
+
+
+def _skip_pytest_exception_stop(stopped: dict[str, object], cwd: str | None) -> bool:
+    if stopped.get("state") != "stopped" or stopped.get("stoppedReason") != "exception":
+        return False
+
+    location = stopped.get("location")
+    if not isinstance(location, dict):
+        return False
+    source = location.get("source")
+    if not isinstance(source, dict):
+        return False
+    file_name = source.get("path")
+    if not isinstance(file_name, str) or not file_name:
+        return False
+
+    path = Path(file_name)
+    parts = set(path.parts)
+    if "site-packages" in parts or ".venv" in parts or "_pytest" in parts:
+        return True
+
+    try:
+        path.resolve().relative_to(Path(cwd or os.getcwd()).resolve())
+    except ValueError:
+        return True
+    return False
+
+
+def _continue_pytest_execution(session: DebugSession, timeout: float, cwd: str | None) -> dict[str, object]:
+    stopped = session.continue_execution(timeout=timeout)
+    for _ in range(50):
+        if not _skip_pytest_exception_stop(stopped, cwd):
+            return stopped
+        stopped = session.continue_execution(timeout=timeout)
+    return stopped
+
+
 def _debug_python_payload(args: argparse.Namespace) -> dict[str, object]:
     breakpoints = args.breakpoints or []
     stop_on_entry = bool(args.stop_on_entry or not breakpoints)
@@ -466,6 +552,102 @@ def _debug_python_payload(args: argparse.Namespace) -> dict[str, object]:
                 pass
 
 
+def _debug_pytest_payload(args: argparse.Namespace) -> dict[str, object]:
+    breakpoints = args.breakpoints or []
+    pytest_args = _pytest_args(args.pytest_args or [])
+    start = time.monotonic()
+    session: DebugSession | None = None
+
+    try:
+        session = DebugSession.launch_pytest(
+            test_ids=args.test,
+            pytest_args=pytest_args,
+            cwd=args.cwd,
+            python=args.python,
+            timeout=float(args.timeout),
+        )
+        exception_breakpoints: dict[str, object] = {}
+        if args.break_on_failure:
+            exception_breakpoints = session.set_exception_breakpoints(
+                exception_options=[
+                    {
+                        "path": [{"names": ["Python Exceptions"]}, {"names": ["AssertionError"]}],
+                        "breakMode": "always",
+                    }
+                ]
+            )
+        breakpoint_results = [
+            session.set_breakpoints(file=str(item["file"]), lines=[int(item["line"])], cwd=args.cwd)
+            for item in breakpoints
+        ]
+        stopped = _continue_pytest_execution(session, timeout=float(args.timeout), cwd=args.cwd)
+        snapshot: dict[str, object] = {}
+        evaluations: list[dict[str, object]] = []
+        exception: dict[str, object] | None = None
+
+        if stopped.get("state") == "stopped":
+            snapshot = session.top_frame_locals(limit=int(args.locals_limit))
+            if stopped.get("stoppedReason") == "exception":
+                try:
+                    exception = _exception_summary(session.exception_info())
+                except Exception as exc:
+                    exception = {"name": type(exc).__name__, "message": str(exc)}
+            for expression in args.evaluate or []:
+                try:
+                    result = session.evaluate(expression=expression)
+                    evaluations.append(
+                        {
+                            "expression": expression,
+                            "result": result.get("result"),
+                            "type": result.get("type"),
+                        }
+                    )
+                except Exception as exc:
+                    evaluations.append(
+                        {
+                            "expression": expression,
+                            "error": str(exc),
+                            "exceptionType": type(exc).__name__,
+                        }
+                    )
+
+        stopped_summary: dict[str, object] = {
+            "state": stopped.get("state"),
+            "event": stopped.get("event"),
+            "reason": stopped.get("stoppedReason"),
+        }
+        stopped_summary.update(_location_summary(stopped.get("location")))
+
+        pytest_summary: dict[str, object] = {
+            "rootdir": str(Path(args.cwd or os.getcwd()).resolve()),
+            "test_id": " ".join(args.test),
+            "test_ids": args.test,
+            "pytest_args": pytest_args,
+            "outcome": _pytest_outcome(stopped, exception),
+            "duration_seconds": round(time.monotonic() - start, 3),
+        }
+
+        payload: dict[str, object] = {
+            "ok": True,
+            "cwd": str(Path(args.cwd or os.getcwd()).resolve()),
+            "pytest": pytest_summary,
+            "breakpoints": _breakpoint_summaries(breakpoint_results),
+            "exceptionBreakpoints": exception_breakpoints,
+            "stopped": stopped_summary,
+            "locals": _local_summaries(snapshot),
+            "evaluations": evaluations,
+        }
+        if exception is not None:
+            payload["exception"] = exception
+        return payload
+    finally:
+        if session is not None:
+            try:
+                session.stop(terminate_debuggee=True)
+            except Exception:
+                pass
+
+
 def _print_debug_python_human(payload: dict[str, object]) -> None:
     stopped = payload.get("stopped")
     if isinstance(stopped, dict) and stopped.get("state") == "stopped":
@@ -514,6 +696,19 @@ def _print_debug_python_human(payload: dict[str, object]) -> None:
                 print(f"  {expression} -> {item.get('result')}")
 
 
+def _print_debug_pytest_human(payload: dict[str, object]) -> None:
+    pytest = payload.get("pytest")
+    if isinstance(pytest, dict):
+        print(f"Pytest: {pytest.get('test_id', 'unknown')}")
+        print(f"Outcome: {pytest.get('outcome', 'unknown')}")
+
+    exception = payload.get("exception")
+    if isinstance(exception, dict):
+        print(f"Exception: {exception.get('name', 'Exception')}: {exception.get('message', '')}")
+
+    _print_debug_python_human(payload)
+
+
 def _debug_python(args: argparse.Namespace) -> int:
     try:
         payload = _debug_python_payload(args)
@@ -537,6 +732,32 @@ def _debug_python(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         _print_debug_python_human(payload)
+    return 0
+
+
+def _debug_pytest(args: argparse.Namespace) -> int:
+    try:
+        payload = _debug_pytest_payload(args)
+    except Exception as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "exceptionType": type(exc).__name__,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"debug-pytest failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_debug_pytest_human(payload)
     return 0
 
 
@@ -576,6 +797,10 @@ def _format_tool_use(name: str, tool_input: object) -> str:
         program = _basename(tool_input.get("program"))
         if program:
             return f"Tool: {_debugger_tool_name(name)} ({program})"
+    if name.endswith("__debug_pytest"):
+        test_id = tool_input.get("test_id")
+        if isinstance(test_id, str):
+            return f"Tool: {_debugger_tool_name(name)} ({test_id})"
     if name.endswith("__debug_evaluate"):
         expression = tool_input.get("expression")
         if isinstance(expression, str):
@@ -590,6 +815,8 @@ def _format_tool_use(name: str, tool_input: object) -> str:
         command = tool_input.get("command")
         if isinstance(command, str) and "vibe-debug" in command and "debug-python" in command:
             return "Tool: Bash (vibe-debug debug-python)"
+        if isinstance(command, str) and "vibe-debug" in command and "debug-pytest" in command:
+            return "Tool: Bash (vibe-debug debug-pytest)"
         description = tool_input.get("description")
         if isinstance(description, str) and description:
             return f"Tool: Bash ({description})"
@@ -799,7 +1026,25 @@ def _format_claude_stream(input_stream, output_stream) -> int:
     return 0
 
 
+def _normalize_pytest_arg_flags(argv: list[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item == "--pytest-arg" and index + 1 < len(argv):
+            normalized.append(f"--pytest-arg={argv[index + 1]}")
+            index += 2
+            continue
+        normalized.append(item)
+        index += 1
+    return normalized
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = _normalize_pytest_arg_flags(argv)
+
     parser = argparse.ArgumentParser(description="Utilities for the vibe-debug MCP server.")
     parser.add_argument("--version", action="version", version=f"vibe-debug {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -852,6 +1097,36 @@ def main(argv: list[str] | None = None) -> int:
     debug_python.add_argument("--stop-on-entry", action="store_true")
     debug_python.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
     debug_python.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    debug_pytest = subparsers.add_parser(
+        "debug-pytest",
+        help="Run pytest under the debugger and print stopped-frame state.",
+    )
+    debug_pytest.add_argument("test", nargs="+", help="Pytest node ID(s), such as tests/test_foo.py::test_bar.")
+    debug_pytest.add_argument(
+        "--pytest-arg",
+        dest="pytest_args",
+        action="append",
+        default=[],
+        help="Argument passed through to pytest. Repeat for multiple args.",
+    )
+    debug_pytest.add_argument(
+        "--break",
+        "-b",
+        dest="breakpoints",
+        action="append",
+        type=_parse_breakpoint,
+        default=[],
+        metavar="FILE:LINE",
+        help="Set a line breakpoint before continuing. Repeat for multiple breakpoints.",
+    )
+    debug_pytest.add_argument("--cwd", help="Working directory for pytest.")
+    debug_pytest.add_argument("--python", help="Python executable for debugpy and pytest.")
+    debug_pytest.add_argument("--timeout", type=float, default=30.0)
+    debug_pytest.add_argument("--locals-limit", type=int, default=40)
+    debug_pytest.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
+    debug_pytest.add_argument("--break-on-failure", action="store_true", default=True)
+    debug_pytest.add_argument("--no-break-on-failure", action="store_false", dest="break_on_failure")
+    debug_pytest.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     subparsers.add_parser("claude-progress", help="Format Claude Code stream-json output for humans.")
 
     args = parser.parse_args(argv)
@@ -873,6 +1148,8 @@ def main(argv: list[str] | None = None) -> int:
         return _demo_project(args.target, args.directory, args.force)
     if args.command == "debug-python":
         return _debug_python(args)
+    if args.command == "debug-pytest":
+        return _debug_pytest(args)
     if args.command == "claude-progress":
         return _format_claude_stream(sys.stdin, sys.stdout)
     parser.error(f"unknown command: {args.command}")

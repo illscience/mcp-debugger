@@ -13,6 +13,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "examples" / "buggy_discount.py"
+PYTEST_TARGET = ROOT / "examples" / "test_buggy_discount.py"
 
 
 class MCPClient:
@@ -136,6 +137,7 @@ def main() -> int:
         required = {
             "debug_guidance",
             "debug_python_repro",
+            "debug_pytest",
             "debug_launch",
             "debug_attach",
             "debug_set_breakpoints",
@@ -168,6 +170,21 @@ def main() -> int:
         assert repro["stopped"]["state"] == "stopped", repro
         assert repro["stopped"]["location"]["name"] == "main", repro
         assert any(variable["name"] == "price" for variable in repro["snapshot"]["locals"]), repro
+
+        pytest_repro = client.call_tool(
+            "debug_pytest",
+            {
+                "test_id": f"{PYTEST_TARGET.relative_to(ROOT)}::test_gold",
+                "cwd": str(ROOT),
+                "python": sys.executable,
+                "keep_session": False,
+                "timeout": 30,
+            },
+            timeout=50,
+        )
+        assert pytest_repro["pytest"]["outcome"] == "failed", pytest_repro
+        assert pytest_repro["exception"]["name"] == "AssertionError", pytest_repro
+        assert pytest_repro["stopped"]["location"]["name"] == "test_gold", pytest_repro
 
         launch = client.call_tool(
             "debug_launch",
@@ -315,6 +332,7 @@ def main() -> int:
                         "MCP initialize/tools/list",
                         "debug_guidance",
                         "debug_python_repro",
+                        "debug_pytest",
                         "debug_launch",
                         "debug_attach",
                         "debug_set_breakpoints",

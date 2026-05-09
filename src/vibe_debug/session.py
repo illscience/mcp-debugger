@@ -123,6 +123,67 @@ class DebugSession:
         return session
 
     @classmethod
+    def launch_pytest(
+        cls,
+        test_ids: list[str],
+        pytest_args: list[str] | None = None,
+        cwd: str | None = None,
+        python: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> "DebugSession":
+        python_executable = python or sys.executable
+        working_directory = _normalize_path(cwd or os.getcwd())
+        host = "127.0.0.1"
+        port = _free_port()
+        args = [*(pytest_args or []), *test_ids]
+
+        adapter_process = subprocess.Popen(
+            [python_executable, "-m", "debugpy.adapter", "--host", host, "--port", str(port)],
+            cwd=working_directory,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        client = _connect_dap_with_retry(host, port, adapter_process=adapter_process, timeout=timeout)
+        session = cls(
+            session_id=str(uuid.uuid4()),
+            client=client,
+            adapter_process=adapter_process,
+            metadata={
+                "mode": "pytest",
+                "module": "pytest",
+                "testIds": test_ids,
+                "pytestArgs": pytest_args or [],
+                "cwd": working_directory,
+                "adapterHost": host,
+                "adapterPort": port,
+            },
+        )
+        session._initialize()
+
+        launch_args: dict[str, Any] = {
+            "name": "vibe-debug-pytest",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "cwd": working_directory,
+            "args": args,
+            "env": env or {},
+            "console": "internalConsole",
+            "justMyCode": False,
+            "stopOnEntry": False,
+            "python": [python_executable],
+        }
+        session.launch_request_seq = client.send_request("launch", launch_args)
+        session.event_cursor = client.event_count()
+        initialized = client.wait_for_event("initialized", timeout=timeout, after=0)
+        session.event_cursor = max(session.event_cursor, client.events.index(initialized) + 1)
+        session.state = "configuring"
+        return session
+
+    @classmethod
     def attach(
         cls,
         host: str,
@@ -165,6 +226,24 @@ class DebugSession:
             "sessionId": self.session_id,
             "state": self.state,
             "file": path,
+            "breakpoints": body.get("breakpoints", []),
+        }
+
+    def set_exception_breakpoints(
+        self,
+        filters: list[str] | None = None,
+        exception_options: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        body = self.client.request(
+            "setExceptionBreakpoints",
+            {
+                "filters": filters or [],
+                "exceptionOptions": exception_options or [],
+            },
+        )
+        return {
+            "sessionId": self.session_id,
+            "state": self.state,
             "breakpoints": body.get("breakpoints", []),
         }
 
@@ -271,6 +350,19 @@ class DebugSession:
             "result": body.get("result"),
             "type": body.get("type"),
             "variablesReference": body.get("variablesReference"),
+        }
+
+    def exception_info(self, thread_id: int | None = None) -> dict[str, Any]:
+        selected_thread = thread_id or self.stopped_thread_id
+        if selected_thread is None:
+            raise DebugSessionError("no stopped thread is available")
+
+        body = self.client.request("exceptionInfo", {"threadId": selected_thread})
+        return {
+            "sessionId": self.session_id,
+            "state": self.state,
+            "threadId": selected_thread,
+            **body,
         }
 
     def top_frame_locals(self, limit: int = 40) -> dict[str, Any]:
@@ -441,6 +533,15 @@ class DebugSessionManager:
 
     def launch(self, **kwargs: Any) -> dict[str, Any]:
         session = DebugSession.launch(**kwargs)
+        self._sessions[session.session_id] = session
+        return {
+            "sessionId": session.session_id,
+            "state": session.state,
+            **session.metadata,
+        }
+
+    def launch_pytest(self, **kwargs: Any) -> dict[str, Any]:
+        session = DebugSession.launch_pytest(**kwargs)
         self._sessions[session.session_id] = session
         return {
             "sessionId": session.session_id,
