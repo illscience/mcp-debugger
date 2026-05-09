@@ -23,6 +23,7 @@ class MCPServerTests(unittest.TestCase):
         tools = {tool["name"] for tool in listed["result"]["tools"]}
         self.assertIn("debug_guidance", tools)
         self.assertIn("debug_python_repro", tools)
+        self.assertIn("debug_typescript_repro", tools)
         self.assertIn("debug_launch", tools)
         self.assertIn("debug_set_breakpoints", tools)
         self.assertIn("debug_step", tools)

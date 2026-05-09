@@ -1,7 +1,7 @@
 {
   "name": "@illscience/vibe-debug",
   "version": "0.2.2",
-  "description": "Agent-friendly debugger CLI and MCP server.",
+  "description": "Agent-friendly Python and TypeScript debugger CLI and MCP server.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {

@@ -2,7 +2,7 @@
 
 A debugger CLI and MCP server for coding agents.
 
-`vibe-debug` gives Codex, Claude Code, Cursor-style agents, and other MCP clients real debugger tools: launch, attach, set breakpoints, continue, step into/out/over, inspect stack frames, read locals, expand variables, evaluate expressions, and stop sessions.
+`vibe-debug` gives Codex, Claude Code, Cursor-style agents, and other MCP clients real debugger tools: launch Python or TypeScript/JavaScript programs, attach where supported, set breakpoints, continue, step into/out/over, inspect stack frames, read locals, expand variables, evaluate expressions, and stop sessions.
 
 The goal is simple: when an agent is fixing a bug, verifying behavior, or writing code against a real runtime path, it should be able to use a debugger the same way a human engineer would.
 
@@ -17,14 +17,14 @@ coding agent
 
 ## Claude Code Skill Install
 
-Default path: install a lightweight project skill. This keeps debugger tools out of Claude's global MCP context and lets Claude discover the CLI when Python work needs runtime state, including debugging, verification, and implementation tasks.
+Default path: install a lightweight project skill. This keeps debugger tools out of Claude's global MCP context and lets Claude discover the CLI when Python or TypeScript work needs runtime state, including debugging, verification, and implementation tasks.
 
 ```bash
 npx -y github:illscience/vibe-debug doctor
 npx -y github:illscience/vibe-debug init-cli-skill --target claude
 ```
 
-That writes `.claude/skills/vibe-debug/SKILL.md`: a short skill whose frontmatter explicitly triggers when a Python bug, failing test/script, wrong output, exception, local request, or code-writing task would benefit from live runtime state. The skill body is CLI documentation for script, request, and attach debugging.
+That writes `.claude/skills/vibe-debug/SKILL.md`: a short skill whose frontmatter explicitly triggers when a Python or TypeScript bug, failing test/script, wrong output, exception, local request, or code-writing task would benefit from live runtime state. The skill body is CLI documentation for script, request, and attach debugging.
 
 ## Codex Skill Install
 
@@ -125,6 +125,27 @@ Use `--json` when you want machine-readable output for an agent or script:
 npx -y github:illscience/vibe-debug debug-python ./buggy_invoice.py --break ./buggy_invoice.py:13 --eval "subtotal * (1 - rate)" --json
 ```
 
+### Debug A TypeScript Script
+
+For TypeScript or JavaScript scripts that run under Node, use `debug-typescript`. The command launches Node with the inspector enabled, sets your breakpoint before the script runs, continues to the breakpoint, and returns locals/evaluations:
+
+```bash
+npx -y github:illscience/vibe-debug debug-typescript ./pricing.ts \
+  --break ./pricing.ts:12 \
+  --eval "finalTotal" \
+  --json
+```
+
+Node 22+ can execute many `.ts` files directly via built-in type stripping. For projects that use a loader or runtime such as `tsx` or `ts-node`, pass the needed Node arguments before the script:
+
+```bash
+npx -y github:illscience/vibe-debug debug-typescript ./src/pricing.ts \
+  --node-arg "--import" \
+  --node-arg "tsx" \
+  --break ./src/pricing.ts:12 \
+  --json
+```
+
 ### Debug A Local Web Request
 
 For Flask, Django, FastAPI, or another Python web app that can be launched from a script, use `debug-request`. It starts the server under `debugpy`, waits for the app to accept requests, sends the URL, stops at your breakpoint, and returns locals/evaluations:
@@ -162,7 +183,7 @@ By default, `attach-python` detaches without terminating the debuggee. Pass `--t
 
 ## Status
 
-This is an alpha release. The first debugger backend is Python via [`debugpy`](https://github.com/microsoft/debugpy); the MCP server is designed to grow to TypeScript/Node and other language runtimes.
+This is an alpha release. Python debugging uses [`debugpy`](https://github.com/microsoft/debugpy). TypeScript/JavaScript script debugging uses the Node inspector protocol. The MCP server is designed to grow to more language runtimes.
 
 The npm package name in this repository is `@illscience/vibe-debug`. Until it is published to npm, the install commands use `npx -y github:illscience/vibe-debug`. After publishing, that can become:
 
@@ -231,11 +252,12 @@ The project skill teaches the agent to run:
 
 ```bash
 npx -y github:illscience/vibe-debug debug-python <script.py> --break <file.py>:<line> --json
+npx -y github:illscience/vibe-debug debug-typescript <script.ts> --break <file.ts>:<line> --json
 npx -y github:illscience/vibe-debug debug-request <server.py> --url <local-url> --break <file.py>:<line> --json
 npx -y github:illscience/vibe-debug attach-python --port <debugpy-port> --break <file.py>:<line> --json
 ```
 
-The CLI launches or attaches to a Python process under `debugpy`, stops at the requested breakpoint, and returns the stopped location, locals, and optional expression evaluations.
+The CLI launches or attaches to a Python process under `debugpy`, or launches a TypeScript/JavaScript script under the Node inspector, stops at the requested breakpoint, and returns the stopped location, locals, and optional expression evaluations.
 
 The skill also tells agents to make debugger usage visible. Before running the debugger, they should state the mode, target script/test/request or attach port, and breakpoint. After it stops, they should state the stopped file, line, function, and the observed values that matter.
 
@@ -247,6 +269,7 @@ Workflow tools:
 
 - `debug_guidance`: returns instructions that tell agents when to use the debugger.
 - `debug_python_repro`: best first tool for a reproducible Python bug. It launches a Python script under `debugpy`, sets breakpoints, continues to the first stop, and returns stack plus top-frame locals.
+- `debug_typescript_repro`: best first tool for reproducible TypeScript or JavaScript behavior. It launches a script under the Node inspector, sets breakpoints, continues to the first stop, and returns stack plus top-frame locals.
 
 Debugger primitives:
 
@@ -275,7 +298,7 @@ If using the local venv:
 .venv/bin/python tools/runtime_proof.py
 ```
 
-The proof talks to the MCP server over stdio, launches `examples/buggy_discount.py` under `debugpy`, sets a breakpoint, continues to it, steps into and out of functions, inspects local variables, evaluates expressions in a paused frame, tests attach mode, exercises the CLI `debug-request` and `attach-python` workflows, and cleans up the session.
+The proof talks to the MCP server over stdio, launches `examples/buggy_discount.py` under `debugpy`, sets a breakpoint, continues to it, steps into and out of functions, inspects local variables, evaluates expressions in a paused frame, tests attach mode, exercises the CLI `debug-request`, `attach-python`, and `debug-typescript` workflows, and cleans up the session.
 
 Expected output:
 
@@ -298,7 +321,9 @@ Expected output:
     "debug_evaluate default top frame",
     "debug_continue to exit",
     "CLI debug-request",
-    "CLI attach-python"
+    "CLI attach-python",
+    "CLI debug-typescript",
+    "MCP debug_typescript_repro"
   ],
   "bugEvidence": {
     "runtimeBuggyExpression": "119.85",
@@ -307,7 +332,9 @@ Expected output:
   "cliEvidence": {
     "debugRequestPerPage": "50",
     "debugRequestPath": "'/wines'",
-    "attachPythonDoubled": "20"
+    "attachPythonDoubled": "20",
+    "debugTypescriptFinalTotal": "102",
+    "debugTypescriptMcpFinalTotal": "102"
   }
 }
 ```
@@ -370,10 +397,10 @@ npx -y github:illscience/vibe-debug agent-instructions --target codex
 The key instruction:
 
 ```text
-When Python behavior can be exercised by a script, test, command, or local request, prefer observing live runtime state before guessing, proposing a fix, or claiming a feature works.
+When Python or TypeScript behavior can be exercised by a script, test, command, or local request, prefer observing live runtime state before guessing, proposing a fix, or claiming a feature works.
 ```
 
-The skill frontmatter is intentionally explicit so agents can load it when a Python task has observable runtime behavior and locals, stack frames, or expression evaluations would provide useful evidence.
+The skill frontmatter is intentionally explicit so agents can load it when a Python or TypeScript task has observable runtime behavior and locals, stack frames, or expression evaluations would provide useful evidence.
 
 ## Development
 
@@ -400,7 +427,7 @@ Build a wheel:
 - Breakpoints by function name, symbol, marker comment, or exception type.
 - Richer first-stop summaries with surrounding source and suggested next debugger actions.
 - Agent-optimized CLI commands, with MCP as a thin wrapper for clients that prefer tools over shell commands.
-- Node.js / Next.js support through the Node inspector or Chrome DevTools Protocol.
+- TypeScript/Node request debugging for local web servers.
 
 ## License
 

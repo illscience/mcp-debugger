@@ -12,9 +12,11 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .agent_guidance import AGENT_USAGE_GUIDANCE, guidance_for_target
+from .node_session import NodeDebugSession
 from .session import DebugSession
 
 
@@ -52,17 +54,23 @@ if __name__ == "__main__":
 
 CLI_DISCOVERY_SKILL = """---
 name: vibe-debug
-description: "Use when the user asks to debug, fix, explain, verify, validate, or implement Python behavior where live runtime state could help. Trigger for reproducible Python bugs, failing Python tests/scripts, wrong output, unexpected exceptions, local web request behavior, or code-writing tasks where breakpoint locals, stack location, or expression evaluation would confirm what the code actually does. Use when a runnable Python command, script, test, or request exists or can be created. Do not use for non-Python bugs, pure style refactors, documentation-only tasks, or cases with no executable behavior to observe."
+description: "Use when the user asks to debug, fix, explain, verify, validate, or implement Python or TypeScript behavior where live runtime state could help. Trigger for reproducible Python bugs, reproducible TypeScript bugs, failing Python tests/scripts, failing TypeScript tests/scripts, wrong output, unexpected exceptions, local web request behavior, or code-writing tasks where breakpoint locals, stack location, or expression evaluation would confirm what the code actually does. Use when a runnable Python or TypeScript command, script, test, or request exists or can be created. Do not use for non-Python/non-TypeScript bugs, pure style refactors, documentation-only tasks, or cases with no executable behavior to observe."
 ---
 
 # Vibe Debug CLI
 
-Use the `vibe-debug` CLI to observe live Python runtime state while debugging, verifying behavior, or writing code.
+Use the `vibe-debug` CLI to observe live Python or TypeScript runtime state while debugging, verifying behavior, or writing code.
 
 ## Primary Command
 
 ```bash
 npx -y github:illscience/vibe-debug debug-python <script.py> --break <file.py>:<line> --json
+```
+
+For TypeScript or JavaScript scripts that run under Node, use:
+
+```bash
+npx -y github:illscience/vibe-debug debug-typescript <script.ts> --break <file.ts>:<line> --json
 ```
 
 For web apps with a local request that reproduces the behavior, prefer:
@@ -85,6 +93,8 @@ Pick a breakpoint at the suspicious calculation, branch, return, assertion, or e
 - `--eval "<expr>"`: evaluate a side-effect-free expression in the paused frame. Repeat for multiple expressions.
 - `--arg "<value>"`: pass one argument to the target program. Repeat for multiple program arguments.
 - `--cwd <dir>`: run the target program from a specific working directory.
+- `--node <path>`: with `debug-typescript`, use a specific Node executable.
+- `--node-arg "<value>"`: with `debug-typescript`, pass a Node argument before the script, such as `--import tsx`.
 - `--url "<local-url>"`: with `debug-request`, send a local HTTP request after the server starts.
 - `--trigger-url "<local-url>"`: with `attach-python`, send a local HTTP request after breakpoints are set.
 - `--locals-limit <n>`: cap the number of locals returned.
@@ -92,8 +102,8 @@ Pick a breakpoint at the suspicious calculation, branch, return, assertion, or e
 
 ## Workflow
 
-1. Find or create the smallest Python command, script, test, or request that exercises the behavior.
-2. Use `debug-python` for scripts/tests, `debug-request` for local web requests, or `attach-python` for an existing debugpy listener.
+1. Find or create the smallest Python or TypeScript command, script, test, or request that exercises the behavior.
+2. Use `debug-python` for Python scripts/tests, `debug-typescript` for TypeScript/JavaScript scripts, `debug-request` for local Python web requests, or `attach-python` for an existing debugpy listener.
 3. Choose a breakpoint near the runtime behavior being diagnosed, verified, or implemented.
 4. Run the selected command with `--json`.
 5. Inspect `stopped`, `locals`, and `evaluations`.
@@ -101,7 +111,7 @@ Pick a breakpoint at the suspicious calculation, branch, return, assertion, or e
 
 ## Communication
 
-Always tell the user when and how you are using the debugger. Before running it, state the debugger mode, the target script/test/request or attach port, and the breakpoint you chose. After it stops, state the stopped file, line, function, and the observed locals or evaluations that matter. If you decide not to use the debugger for a runnable Python behavior task, briefly state why.
+Always tell the user when and how you are using the debugger. Before running it, state the debugger mode, the target script/test/request or attach port, and the breakpoint you chose. After it stops, state the stopped file, line, function, and the observed locals or evaluations that matter. If you decide not to use the debugger for a runnable Python or TypeScript behavior task, briefly state why.
 
 ## Example
 
@@ -441,7 +451,7 @@ def _env_dict(values: list[tuple[str, str]] | None) -> dict[str, str]:
     return {key: value for key, value in values or []}
 
 
-def _evaluation_summaries(session: DebugSession, expressions: list[str]) -> list[dict[str, object]]:
+def _evaluation_summaries(session: Any, expressions: list[str]) -> list[dict[str, object]]:
     evaluations: list[dict[str, object]] = []
     for expression in expressions:
         try:
@@ -574,7 +584,7 @@ def _start_command_trigger(command: str, cwd: str | None, delay: float, timeout:
 
 
 def _collect_stopped_state(
-    session: DebugSession,
+    session: Any,
     stopped: dict[str, object],
     locals_limit: int,
     expressions: list[str],
@@ -695,6 +705,79 @@ def _debug_python(args: argparse.Namespace) -> int:
             )
         else:
             print(f"debug-python failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_debug_python_human(payload)
+    return 0
+
+
+def _debug_typescript_payload(args: argparse.Namespace) -> dict[str, object]:
+    breakpoints = args.breakpoints or []
+    stop_on_entry = bool(args.stop_on_entry or not breakpoints)
+    session: NodeDebugSession | None = None
+
+    try:
+        session = NodeDebugSession.launch(
+            program=args.program,
+            args=args.program_args or [],
+            cwd=args.cwd,
+            node=args.node,
+            node_args=args.node_args or [],
+            env=_env_dict(args.env),
+            timeout=float(args.timeout),
+        )
+        breakpoint_results = [
+            session.set_breakpoints(file=str(item["file"]), lines=[int(item["line"])], cwd=args.cwd)
+            for item in breakpoints
+        ]
+        stopped = session.continue_execution(timeout=float(args.timeout), stop_on_entry=stop_on_entry)
+        snapshot, evaluations = _collect_stopped_state(
+            session=session,
+            stopped=stopped,
+            locals_limit=int(args.locals_limit),
+            expressions=args.evaluate or [],
+        )
+
+        return {
+            "ok": True,
+            "mode": "debug-typescript",
+            "program": str(Path(args.program).resolve()),
+            "cwd": str(Path(args.cwd or os.getcwd()).resolve()),
+            "runtime": "node",
+            "breakpoints": _breakpoint_summaries(breakpoint_results),
+            "stopped": _stopped_summary(stopped),
+            "locals": _local_summaries(snapshot),
+            "evaluations": evaluations,
+        }
+    finally:
+        if session is not None:
+            try:
+                session.stop(terminate_debuggee=True)
+            except Exception:
+                pass
+
+
+def _debug_typescript(args: argparse.Namespace) -> int:
+    try:
+        payload = _debug_typescript_payload(args)
+    except Exception as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "mode": "debug-typescript",
+                        "error": str(exc),
+                        "exceptionType": type(exc).__name__,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"debug-typescript failed: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
@@ -905,7 +988,7 @@ def _format_tool_use(name: str, tool_input: object) -> str:
     if not isinstance(tool_input, dict):
         return f"Tool: {_debugger_tool_name(name)}"
 
-    if name.endswith("__debug_python_repro"):
+    if name.endswith("__debug_python_repro") or name.endswith("__debug_typescript_repro"):
         program = _basename(tool_input.get("program"))
         if program:
             return f"Tool: {_debugger_tool_name(name)} ({program})"
@@ -923,6 +1006,8 @@ def _format_tool_use(name: str, tool_input: object) -> str:
         command = tool_input.get("command")
         if isinstance(command, str) and "vibe-debug" in command and "debug-python" in command:
             return "Tool: Bash (vibe-debug debug-python)"
+        if isinstance(command, str) and "vibe-debug" in command and "debug-typescript" in command:
+            return "Tool: Bash (vibe-debug debug-typescript)"
         description = tool_input.get("description")
         if isinstance(description, str) and description:
             return f"Tool: Bash ({description})"
@@ -1185,6 +1270,51 @@ def main(argv: list[str] | None = None) -> int:
     debug_python.add_argument("--stop-on-entry", action="store_true")
     debug_python.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
     debug_python.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    debug_typescript = subparsers.add_parser(
+        "debug-typescript",
+        aliases=["debug-ts"],
+        help="Run a TypeScript or JavaScript script under the Node inspector and print stopped-frame state.",
+    )
+    debug_typescript.add_argument("program", help="TypeScript or JavaScript script to launch under Node.")
+    debug_typescript.add_argument(
+        "--arg",
+        dest="program_args",
+        action="append",
+        default=[],
+        help="Argument passed to the target program.",
+    )
+    debug_typescript.add_argument(
+        "--break",
+        "-b",
+        dest="breakpoints",
+        action="append",
+        type=_parse_breakpoint,
+        default=[],
+        metavar="FILE:LINE",
+        help="Set a line breakpoint before running. Repeat for multiple breakpoints.",
+    )
+    debug_typescript.add_argument("--cwd", help="Working directory for the target program.")
+    debug_typescript.add_argument("--node", help="Node executable for the target.")
+    debug_typescript.add_argument(
+        "--node-arg",
+        dest="node_args",
+        action="append",
+        default=[],
+        help="Argument passed to Node before the program, such as --import tsx. Repeat for multiple Node arguments.",
+    )
+    debug_typescript.add_argument(
+        "--env",
+        action="append",
+        type=_parse_env_assignment,
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable to add to the target process. Repeat for multiple values.",
+    )
+    debug_typescript.add_argument("--timeout", type=float, default=20.0)
+    debug_typescript.add_argument("--locals-limit", type=int, default=40)
+    debug_typescript.add_argument("--stop-on-entry", action="store_true")
+    debug_typescript.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
+    debug_typescript.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     debug_request = subparsers.add_parser(
         "debug-request",
         help="Launch a Python web app under the debugger, trigger a local URL, and print stopped-frame state.",
@@ -1285,6 +1415,8 @@ def main(argv: list[str] | None = None) -> int:
         return _demo_project(args.target, args.directory, args.force)
     if args.command == "debug-python":
         return _debug_python(args)
+    if args.command in {"debug-typescript", "debug-ts"}:
+        return _debug_typescript(args)
     if args.command == "debug-request":
         return _debug_request(args)
     if args.command == "attach-python":

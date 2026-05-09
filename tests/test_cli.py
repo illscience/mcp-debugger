@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import subprocess
 import sys
@@ -31,6 +32,17 @@ def line_with(path: Path, marker: str) -> int:
         if marker in line:
             return index
     raise AssertionError(f"marker not found: {marker}")
+
+
+def node_supports_type_stripping() -> bool:
+    node = shutil.which("node")
+    if not node:
+        return False
+    with tempfile.TemporaryDirectory() as directory:
+        script = Path(directory) / "probe.ts"
+        script.write_text("const value: number = 41;\nconsole.log(value + 1);\n", encoding="utf-8")
+        result = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=10, check=False)
+    return result.returncode == 0 and "42" in result.stdout
 
 
 class CLITests(unittest.TestCase):
@@ -97,13 +109,15 @@ class CLITests(unittest.TestCase):
             contents = path.read_text(encoding="utf-8")
             self.assertIn("description:", contents)
             self.assertIn("reproducible Python bug", contents)
+            self.assertIn("TypeScript behavior", contents)
             self.assertIn("failing Python test", contents)
-            self.assertIn("verify, validate, or implement Python behavior", contents)
+            self.assertIn("verify, validate, or implement Python or TypeScript behavior", contents)
             self.assertIn("code-writing tasks", contents)
-            self.assertIn("Do not use for non-Python bugs", contents)
+            self.assertIn("Do not use for non-Python/non-TypeScript bugs", contents)
             self.assertIn("Always tell the user when and how you are using the debugger", contents)
             self.assertIn("stopped file, line, function", contents)
             self.assertIn("debug-python <script.py>", contents)
+            self.assertIn("debug-typescript <script.ts>", contents)
             self.assertIn("--break <file.py>:<line>", contents)
             self.assertIn("--json", contents)
 
@@ -156,6 +170,57 @@ class CLITests(unittest.TestCase):
         self.assertIn("x = 41", output)
         self.assertIn("y = 42", output)
         self.assertIn("y -> 42", output)
+
+    @unittest.skipUnless(node_supports_type_stripping(), "node cannot execute TypeScript directly")
+    def test_debug_typescript_stops_and_prints_locals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "sample.ts"
+            script.write_text(
+                "\n".join(
+                    [
+                        "function calculateTotal(price: number, rate: number): number {",
+                        "    const discount = price * rate;",
+                        "    const finalTotal = price - discount;",
+                        "    console.log(finalTotal); // BREAK_TS",
+                        "    return finalTotal;",
+                        "}",
+                        "",
+                        "calculateTotal(120, 0.15);",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            breakpoint_line = line_with(script, "BREAK_TS")
+
+            code, output = call_cli(
+                [
+                    "debug-typescript",
+                    str(script),
+                    "--break",
+                    f"{script}:{breakpoint_line}",
+                    "--eval",
+                    "finalTotal",
+                    "--json",
+                    "--timeout",
+                    "20",
+                ]
+            )
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["mode"], "debug-typescript")
+        self.assertEqual(payload["runtime"], "node")
+        self.assertEqual(payload["stopped"]["function"], "calculateTotal")
+        self.assertEqual(payload["stopped"]["line"], breakpoint_line)
+        locals_by_name = {item["name"]: item["value"] for item in payload["locals"]}
+        self.assertEqual(locals_by_name["price"], "120")
+        self.assertEqual(locals_by_name["rate"], "0.15")
+        self.assertEqual(locals_by_name["discount"], "18")
+        self.assertEqual(locals_by_name["finalTotal"], "102")
+        evaluations = {item["expression"]: item["result"] for item in payload["evaluations"]}
+        self.assertEqual(evaluations["finalTotal"], "102")
 
     def test_debug_request_starts_server_triggers_url_and_prints_request_locals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

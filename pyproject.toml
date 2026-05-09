@@ -1,11 +1,11 @@
 [project]
 name = "vibe-debug"
 version = "0.2.2"
-description = "Agent-friendly debugger CLI and MCP server for inspecting live runtime state."
+description = "Agent-friendly Python and TypeScript debugger CLI and MCP server for inspecting live runtime state."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-keywords = ["mcp", "debugger", "debugpy", "dap", "coding-agent", "codex", "claude-code"]
+keywords = ["mcp", "debugger", "debugpy", "typescript", "node-inspector", "dap", "coding-agent", "codex", "claude-code"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

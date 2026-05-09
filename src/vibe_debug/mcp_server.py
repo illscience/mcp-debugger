@@ -8,7 +8,8 @@ from typing import Any, Callable
 
 from . import __version__
 from .agent_guidance import AGENT_USAGE_GUIDANCE
-from .session import DebugSessionManager
+from .node_session import NodeDebugSessionManager
+from .session import DebugSessionError, DebugSessionManager
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -73,6 +74,61 @@ def _tool_definitions() -> list[dict[str, Any]]:
             ),
         },
         {
+            "name": "debug_typescript_repro",
+            "description": (
+                "Use this first for reproducible TypeScript or JavaScript behavior. Launch a script under "
+                "the Node inspector, set breakpoints, continue to the first stop, and return stack plus "
+                "top-frame locals."
+            ),
+            "inputSchema": _schema(
+                {
+                    "program": {"type": "string", "description": "Path to the TypeScript or JavaScript script."},
+                    "args": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "cwd": {"type": "string", "description": "Working directory for the target program."},
+                    "node": {"type": "string", "description": "Node executable to use for the target."},
+                    "node_args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": [],
+                        "description": "Arguments passed to Node before the script, such as --import tsx.",
+                    },
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Environment variables to add to the target process.",
+                    },
+                    "breakpoints": {
+                        "type": "array",
+                        "description": "Breakpoints to set before the script starts running.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {"type": "string"},
+                                "line": {"type": "integer"},
+                            },
+                            "required": ["file", "line"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "evaluations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": [],
+                        "description": "Read-style expressions to evaluate in the stopped frame.",
+                    },
+                    "stop_on_entry": {"type": "boolean", "default": False},
+                    "timeout": {"type": "number", "default": 20},
+                    "locals_limit": {"type": "integer", "default": 40},
+                    "keep_session": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Keep the session open after the first stop so the agent can step or inspect more.",
+                    },
+                },
+                ["program"],
+            ),
+        },
+        {
             "name": "debug_launch",
             "description": "Launch a Python program under debugpy and pause before user code until breakpoints are configured.",
             "inputSchema": _schema(
@@ -118,7 +174,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "debug_set_breakpoints",
-            "description": "Set one or more line breakpoints in a Python source file.",
+            "description": "Set one or more line breakpoints in a source file.",
             "inputSchema": _schema(
                 {
                     "sessionId": {"type": "string"},
@@ -170,7 +226,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": _schema(
                 {
                     "sessionId": {"type": "string"},
-                    "frameId": {"type": "integer"},
+                    "frameId": {"type": ["integer", "string"]},
                 },
                 ["sessionId", "frameId"],
             ),
@@ -195,7 +251,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 {
                     "sessionId": {"type": "string"},
                     "expression": {"type": "string"},
-                    "frameId": {"type": "integer"},
+                    "frameId": {"type": ["integer", "string"]},
                     "context": {"type": "string", "default": "repl"},
                 },
                 ["sessionId", "expression"],
@@ -218,9 +274,11 @@ def _tool_definitions() -> list[dict[str, Any]]:
 class MCPDebuggerServer:
     def __init__(self) -> None:
         self.manager = DebugSessionManager()
+        self.node_manager = NodeDebugSessionManager()
         self.handlers: dict[str, ToolHandler] = {
             "debug_guidance": self._debug_guidance,
             "debug_python_repro": self._debug_python_repro,
+            "debug_typescript_repro": self._debug_typescript_repro,
             "debug_launch": self._debug_launch,
             "debug_attach": self._debug_attach,
             "debug_set_breakpoints": self._debug_set_breakpoints,
@@ -237,6 +295,7 @@ class MCPDebuggerServer:
         return {
             "guidance": AGENT_USAGE_GUIDANCE,
             "recommendedFirstTool": "debug_python_repro",
+            "recommendedFirstTools": ["debug_python_repro", "debug_typescript_repro"],
             "primitiveTools": [
                 "debug_launch",
                 "debug_attach",
@@ -271,6 +330,7 @@ class MCPDebuggerServer:
                     )
         finally:
             self.manager.stop_all()
+            self.node_manager.stop_all()
 
     def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
@@ -307,10 +367,12 @@ class MCPDebuggerServer:
 
         if method == "shutdown":
             self.manager.stop_all()
+            self.node_manager.stop_all()
             return self._result(message_id, {})
 
         if method == "exit":
             self.manager.stop_all()
+            self.node_manager.stop_all()
             raise SystemExit(0)
 
         return {
@@ -386,6 +448,67 @@ class MCPDebuggerServer:
             ],
         }
 
+    def _debug_typescript_repro(self, args: dict[str, Any]) -> dict[str, Any]:
+        timeout = float(args.get("timeout", 20))
+        launch = self.node_manager.launch(
+            program=args["program"],
+            args=args.get("args") or [],
+            cwd=args.get("cwd"),
+            node=args.get("node"),
+            node_args=args.get("node_args") or [],
+            env=args.get("env"),
+            timeout=timeout,
+        )
+        session_id = launch["sessionId"]
+        session = self.node_manager.get(session_id)
+        breakpoint_results: list[dict[str, Any]] = []
+
+        for item in args.get("breakpoints") or []:
+            breakpoint_results.append(
+                session.set_breakpoints(
+                    file=item["file"],
+                    lines=[int(item["line"])],
+                    cwd=args.get("cwd"),
+                )
+            )
+
+        stopped = session.continue_execution(
+            timeout=timeout,
+            stop_on_entry=bool(args.get("stop_on_entry", False) or not breakpoint_results),
+        )
+        snapshot: dict[str, Any] = {}
+        evaluations: list[dict[str, Any]] = []
+        if stopped.get("state") == "stopped":
+            snapshot = session.top_frame_locals(limit=int(args.get("locals_limit", 40)))
+            for expression in args.get("evaluations") or []:
+                try:
+                    evaluations.append(session.evaluate(expression=expression))
+                except Exception as exc:
+                    evaluations.append(
+                        {
+                            "expression": expression,
+                            "error": str(exc),
+                            "exceptionType": type(exc).__name__,
+                        }
+                    )
+
+        if not bool(args.get("keep_session", True)):
+            self.node_manager.stop(session_id)
+
+        return {
+            "sessionId": session_id,
+            "launch": launch,
+            "breakpoints": breakpoint_results,
+            "stopped": stopped,
+            "snapshot": snapshot,
+            "evaluations": evaluations,
+            "nextActions": [
+                "Use debug_step to move over/into/out from the current line.",
+                "Use debug_evaluate for read-style expressions in the stopped frame.",
+                "Use debug_stop when finished with this session.",
+            ],
+        }
+
     def _debug_attach(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.manager.attach(
             host=args.get("host") or "127.0.0.1",
@@ -395,23 +518,23 @@ class MCPDebuggerServer:
         )
 
     def _debug_set_breakpoints(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self.manager.get(args["sessionId"]).set_breakpoints(
+        return self._get_session(args["sessionId"]).set_breakpoints(
             file=args["file"],
             lines=[int(line) for line in args["lines"]],
             cwd=args.get("cwd"),
         )
 
     def _debug_continue(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self.manager.get(args["sessionId"]).continue_execution(timeout=float(args.get("timeout", 15)))
+        return self._get_session(args["sessionId"]).continue_execution(timeout=float(args.get("timeout", 15)))
 
     def _debug_step(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self.manager.get(args["sessionId"]).step(
+        return self._get_session(args["sessionId"]).step(
             kind=args["kind"],
             timeout=float(args.get("timeout", 15)),
         )
 
     def _debug_stack(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self.manager.get(args["sessionId"]).stack(
+        return self._get_session(args["sessionId"]).stack(
             thread_id=args.get("threadId"),
             levels=int(args.get("levels", 20)),
         )
@@ -427,17 +550,28 @@ class MCPDebuggerServer:
         )
 
     def _debug_evaluate(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self.manager.get(args["sessionId"]).evaluate(
+        return self._get_session(args["sessionId"]).evaluate(
             expression=args["expression"],
             frame_id=args.get("frameId"),
             context=args.get("context", "repl"),
         )
 
     def _debug_stop(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.node_manager.has(args["sessionId"]):
+            return self.node_manager.stop(
+                session_id=args["sessionId"],
+                terminate_debuggee=bool(args.get("terminate_debuggee", True)),
+            )
         return self.manager.stop(
             session_id=args["sessionId"],
             terminate_debuggee=bool(args.get("terminate_debuggee", True)),
         )
+
+    def _get_session(self, session_id: str) -> Any:
+        try:
+            return self.manager.get(session_id)
+        except DebugSessionError:
+            return self.node_manager.get(session_id)
 
     @staticmethod
     def _result(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:

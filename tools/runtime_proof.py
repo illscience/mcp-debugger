@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import socket
 import subprocess
 import sys
@@ -135,6 +136,17 @@ def run_cli(args: list[str], timeout: float = 60.0) -> dict[str, Any]:
     return json.loads(process.stdout)
 
 
+def node_supports_type_stripping() -> bool:
+    node = shutil.which("node")
+    if not node:
+        return False
+    with tempfile.TemporaryDirectory() as directory:
+        script = Path(directory) / "probe.ts"
+        script.write_text("const value: number = 41;\nconsole.log(value + 1);\n", encoding="utf-8")
+        result = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=10, check=False)
+    return result.returncode == 0 and "42" in result.stdout
+
+
 def top_frame(client: MCPClient, session_id: str) -> dict[str, Any]:
     stack = client.call_tool("debug_stack", {"sessionId": session_id})
     frames = stack["frames"]
@@ -165,6 +177,7 @@ def main() -> int:
         required = {
             "debug_guidance",
             "debug_python_repro",
+            "debug_typescript_repro",
             "debug_launch",
             "debug_attach",
             "debug_set_breakpoints",
@@ -180,6 +193,7 @@ def main() -> int:
 
         guidance = client.call_tool("debug_guidance", {})
         assert guidance["recommendedFirstTool"] == "debug_python_repro", guidance
+        assert "debug_typescript_repro" in guidance["recommendedFirstTools"], guidance
 
         main_call_line = line_with("BREAK_MAIN_CALL")
         repro = client.call_tool(
@@ -338,6 +352,8 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory() as directory:
             proof_root = Path(directory)
+            typescript_proved: list[str] = []
+            typescript_evidence: dict[str, str] = {}
 
             web_port = free_port()
             web_target = proof_root / "web_probe.py"
@@ -454,6 +470,67 @@ def main() -> int:
                         attach_cli_process.kill()
                         attach_cli_process.wait(timeout=5)
 
+            if node_supports_type_stripping():
+                ts_target = proof_root / "pricing.ts"
+                ts_target.write_text(
+                    "\n".join(
+                        [
+                            "function calculateTotal(price: number, rate: number): number {",
+                            "    const discount = price * rate;",
+                            "    const finalTotal = price - discount;",
+                            "    console.log(finalTotal); // BREAK_TS",
+                            "    return finalTotal;",
+                            "}",
+                            "",
+                            "calculateTotal(120, 0.15);",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                ts_line = line_with_file(ts_target, "BREAK_TS")
+
+                ts_cli = run_cli(
+                    [
+                        "debug-typescript",
+                        str(ts_target),
+                        "--break",
+                        f"{ts_target}:{ts_line}",
+                        "--eval",
+                        "finalTotal",
+                        "--json",
+                        "--timeout",
+                        "20",
+                    ]
+                )
+                assert ts_cli["stopped"]["state"] == "stopped", ts_cli
+                assert ts_cli["stopped"]["function"] == "calculateTotal", ts_cli
+                ts_cli_evals = {item["expression"]: item["result"] for item in ts_cli["evaluations"]}
+                assert ts_cli_evals["finalTotal"] == "102", ts_cli
+                typescript_proved.append("CLI debug-typescript")
+                typescript_evidence["debugTypescriptFinalTotal"] = ts_cli_evals["finalTotal"]
+
+                ts_mcp = client.call_tool(
+                    "debug_typescript_repro",
+                    {
+                        "program": str(ts_target),
+                        "cwd": str(proof_root),
+                        "breakpoints": [{"file": str(ts_target), "line": ts_line}],
+                        "evaluations": ["finalTotal"],
+                        "keep_session": False,
+                        "timeout": 20,
+                    },
+                    timeout=40,
+                )
+                assert ts_mcp["stopped"]["state"] == "stopped", ts_mcp
+                assert ts_mcp["stopped"]["location"]["name"] == "calculateTotal", ts_mcp
+                ts_mcp_evals = {item["expression"]: item["result"] for item in ts_mcp["evaluations"]}
+                assert ts_mcp_evals["finalTotal"] == "102", ts_mcp
+                typescript_proved.append("MCP debug_typescript_repro")
+                typescript_evidence["debugTypescriptMcpFinalTotal"] = ts_mcp_evals["finalTotal"]
+            else:
+                typescript_proved.append("TypeScript skipped: local Node cannot execute .ts directly")
+
         print(
             json.dumps(
                 {
@@ -475,6 +552,7 @@ def main() -> int:
                         "debug_continue to exit",
                         "CLI debug-request",
                         "CLI attach-python",
+                        *typescript_proved,
                     ],
                     "bugEvidence": {
                         "runtimeBuggyExpression": buggy_value["result"],
@@ -484,6 +562,7 @@ def main() -> int:
                         "debugRequestPerPage": debug_request_evals["per_page"],
                         "debugRequestPath": debug_request_evals["path"],
                         "attachPythonDoubled": attach_cli_evals["doubled"],
+                        **typescript_evidence,
                     },
                 },
                 indent=2,
