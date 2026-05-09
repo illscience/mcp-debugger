@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -15,6 +18,19 @@ def call_cli(args: list[str]) -> tuple[int, str]:
     with redirect_stdout(stdout):
         code = main(args)
     return code, stdout.getvalue()
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def line_with(path: Path, marker: str) -> int:
+    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if marker in line:
+            return index
+    raise AssertionError(f"marker not found: {marker}")
 
 
 class CLITests(unittest.TestCase):
@@ -82,7 +98,11 @@ class CLITests(unittest.TestCase):
             self.assertIn("description:", contents)
             self.assertIn("reproducible Python bug", contents)
             self.assertIn("failing Python test", contents)
+            self.assertIn("verify, validate, or implement Python behavior", contents)
+            self.assertIn("code-writing tasks", contents)
             self.assertIn("Do not use for non-Python bugs", contents)
+            self.assertIn("Always tell the user when and how you are using the debugger", contents)
+            self.assertIn("stopped file, line, function", contents)
             self.assertIn("debug-python <script.py>", contents)
             self.assertIn("--break <file.py>:<line>", contents)
             self.assertIn("--json", contents)
@@ -136,6 +156,142 @@ class CLITests(unittest.TestCase):
         self.assertIn("x = 41", output)
         self.assertIn("y = 42", output)
         self.assertIn("y -> 42", output)
+
+    def test_debug_request_starts_server_triggers_url_and_prints_request_locals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            port = free_port()
+            script = Path(directory) / "web_sample.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "from urllib.parse import parse_qs",
+                        "from wsgiref.simple_server import make_server",
+                        "",
+                        "",
+                        "def app(environ, start_response):",
+                        "    path = environ['PATH_INFO']",
+                        "    raw_query = environ.get('QUERY_STRING', '')",
+                        "    params = parse_qs(raw_query)",
+                        "    per_page = min(max(int(params.get('per_page', ['20'])[0]), 1), 50)",
+                        "    status = '200 OK'",
+                        "    start_response(status, [('Content-Type', 'text/plain')])  # BREAK_HANDLER",
+                        "    return [f'{path} {per_page}'.encode()]",
+                        "",
+                        "",
+                        "if __name__ == '__main__':",
+                        f"    server = make_server('127.0.0.1', {port}, app)",
+                        "    server.serve_forever()",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            breakpoint_line = line_with(script, "BREAK_HANDLER")
+
+            code, output = call_cli(
+                [
+                    "debug-request",
+                    str(script),
+                    "--url",
+                    f"http://127.0.0.1:{port}/wines?per_page=999",
+                    "--break",
+                    f"{script}:{breakpoint_line}",
+                    "--eval",
+                    "per_page",
+                    "--eval",
+                    "path",
+                    "--json",
+                    "--timeout",
+                    "20",
+                ]
+            )
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["mode"], "debug-request")
+        self.assertEqual(payload["stopped"]["function"], "app")
+        self.assertEqual(payload["stopped"]["line"], breakpoint_line)
+        locals_by_name = {item["name"]: item["value"] for item in payload["locals"]}
+        self.assertEqual(locals_by_name["path"], "'/wines'")
+        self.assertEqual(locals_by_name["per_page"], "50")
+        evaluations = {item["expression"]: item["result"] for item in payload["evaluations"]}
+        self.assertEqual(evaluations["per_page"], "50")
+        self.assertEqual(evaluations["path"], "'/wines'")
+
+    def test_attach_python_attaches_to_debugpy_listener_and_prints_locals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            port = free_port()
+            script = Path(directory) / "attach_sample.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "def main():",
+                        "    value = 10",
+                        "    doubled = value * 2",
+                        "    print(doubled)  # BREAK_PRINT",
+                        "",
+                        "",
+                        "if __name__ == '__main__':",
+                        "    main()",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            breakpoint_line = line_with(script, "BREAK_PRINT")
+            target = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "debugpy",
+                    "--listen",
+                    f"127.0.0.1:{port}",
+                    "--wait-for-client",
+                    str(script),
+                ],
+                cwd=directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                code, output = call_cli(
+                    [
+                        "attach-python",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(port),
+                        "--break",
+                        f"{script}:{breakpoint_line}",
+                        "--eval",
+                        "doubled",
+                        "--json",
+                        "--timeout",
+                        "20",
+                    ]
+                )
+            finally:
+                if target.poll() is None:
+                    target.terminate()
+                    try:
+                        target.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        target.kill()
+                        target.wait(timeout=5)
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["mode"], "attach-python")
+        self.assertEqual(payload["stopped"]["function"], "main")
+        self.assertEqual(payload["stopped"]["line"], breakpoint_line)
+        locals_by_name = {item["name"]: item["value"] for item in payload["locals"]}
+        self.assertEqual(locals_by_name["value"], "10")
+        self.assertEqual(locals_by_name["doubled"], "20")
+        evaluations = {item["expression"]: item["result"] for item in payload["evaluations"]}
+        self.assertEqual(evaluations["doubled"], "20")
 
     def test_claude_progress_formats_debugger_events(self) -> None:
         events = [

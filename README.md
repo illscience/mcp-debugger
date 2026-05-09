@@ -4,7 +4,7 @@ A debugger CLI and MCP server for coding agents.
 
 `vibe-debug` gives Codex, Claude Code, Cursor-style agents, and other MCP clients real debugger tools: launch, attach, set breakpoints, continue, step into/out/over, inspect stack frames, read locals, expand variables, evaluate expressions, and stop sessions.
 
-The goal is simple: when an agent is fixing a bug, it should be able to use a debugger the same way a human engineer would.
+The goal is simple: when an agent is fixing a bug, verifying behavior, or writing code against a real runtime path, it should be able to use a debugger the same way a human engineer would.
 
 ```text
 coding agent
@@ -17,14 +17,14 @@ coding agent
 
 ## Claude Code Skill Install
 
-Default path: install a lightweight project skill. This keeps debugger tools out of Claude's global MCP context and lets Claude discover the CLI when a Python bug needs runtime state.
+Default path: install a lightweight project skill. This keeps debugger tools out of Claude's global MCP context and lets Claude discover the CLI when Python work needs runtime state, including debugging, verification, and implementation tasks.
 
 ```bash
 npx -y github:illscience/vibe-debug doctor
 npx -y github:illscience/vibe-debug init-cli-skill --target claude
 ```
 
-That writes `.claude/skills/vibe-debug/SKILL.md`: a short skill whose frontmatter explicitly triggers on reproducible Python bugs, failing Python tests/scripts, wrong output, exceptions, and logic errors where live runtime state would help. The skill body is CLI documentation for `debug-python`.
+That writes `.claude/skills/vibe-debug/SKILL.md`: a short skill whose frontmatter explicitly triggers when a Python bug, failing test/script, wrong output, exception, local request, or code-writing task would benefit from live runtime state. The skill body is CLI documentation for script, request, and attach debugging.
 
 ## Codex Skill Install
 
@@ -99,7 +99,7 @@ codex mcp remove vibe_debug
 
 ## Use The CLI Directly
 
-You can also run the debugger as a normal CLI from any coding agent shell. This avoids adding persistent MCP tools when you only need debugger state for a single bug:
+You can also run the debugger as a normal CLI from any coding agent shell. This avoids adding persistent MCP tools when you only need debugger state for a single bug, feature check, or implementation step:
 
 ```bash
 npx -y github:illscience/vibe-debug debug-python ./buggy_invoice.py --break ./buggy_invoice.py:13 --eval "subtotal * (1 - rate)"
@@ -124,6 +124,41 @@ Use `--json` when you want machine-readable output for an agent or script:
 ```bash
 npx -y github:illscience/vibe-debug debug-python ./buggy_invoice.py --break ./buggy_invoice.py:13 --eval "subtotal * (1 - rate)" --json
 ```
+
+### Debug A Local Web Request
+
+For Flask, Django, FastAPI, or another Python web app that can be launched from a script, use `debug-request`. It starts the server under `debugpy`, waits for the app to accept requests, sends the URL, stops at your breakpoint, and returns locals/evaluations:
+
+```bash
+npx -y github:illscience/vibe-debug debug-request ./app.py \
+  --url "http://127.0.0.1:5000/api/public/wines?per_page=999" \
+  --break ./wine_app/blueprints/public_api.py:80 \
+  --eval "per_page" \
+  --eval "dict(request.args)" \
+  --json
+```
+
+### Attach To A Running Debugpy Process
+
+For an already-running process, start it with a localhost debugpy listener:
+
+```bash
+python -m debugpy --listen 127.0.0.1:5678 --wait-for-client ./app.py
+```
+
+Then attach, set breakpoints, optionally trigger a local request, and inspect the stopped frame:
+
+```bash
+npx -y github:illscience/vibe-debug attach-python \
+  --host 127.0.0.1 \
+  --port 5678 \
+  --break ./wine_app/blueprints/public_api.py:80 \
+  --trigger-url "http://127.0.0.1:5000/api/public/wines?per_page=999" \
+  --eval "per_page" \
+  --json
+```
+
+By default, `attach-python` detaches without terminating the debuggee. Pass `--terminate-debuggee` only when you intentionally want to stop the attached process.
 
 ## Status
 
@@ -196,9 +231,13 @@ The project skill teaches the agent to run:
 
 ```bash
 npx -y github:illscience/vibe-debug debug-python <script.py> --break <file.py>:<line> --json
+npx -y github:illscience/vibe-debug debug-request <server.py> --url <local-url> --break <file.py>:<line> --json
+npx -y github:illscience/vibe-debug attach-python --port <debugpy-port> --break <file.py>:<line> --json
 ```
 
-The CLI launches the target script under `debugpy`, stops at the requested breakpoint, and returns the stopped location, locals, and optional expression evaluations.
+The CLI launches or attaches to a Python process under `debugpy`, stops at the requested breakpoint, and returns the stopped location, locals, and optional expression evaluations.
+
+The skill also tells agents to make debugger usage visible. Before running the debugger, they should state the mode, target script/test/request or attach port, and breakpoint. After it stops, they should state the stopped file, line, function, and the observed values that matter.
 
 ## Optional MCP Tools
 
@@ -236,7 +275,7 @@ If using the local venv:
 .venv/bin/python tools/runtime_proof.py
 ```
 
-The proof talks to the MCP server over stdio, launches `examples/buggy_discount.py` under `debugpy`, sets a breakpoint, continues to it, steps into and out of functions, inspects local variables, evaluates expressions in a paused frame, tests attach mode, and cleans up the session.
+The proof talks to the MCP server over stdio, launches `examples/buggy_discount.py` under `debugpy`, sets a breakpoint, continues to it, steps into and out of functions, inspects local variables, evaluates expressions in a paused frame, tests attach mode, exercises the CLI `debug-request` and `attach-python` workflows, and cleans up the session.
 
 Expected output:
 
@@ -257,11 +296,18 @@ Expected output:
     "debug_step over",
     "debug_evaluate",
     "debug_evaluate default top frame",
-    "debug_continue to exit"
+    "debug_continue to exit",
+    "CLI debug-request",
+    "CLI attach-python"
   ],
   "bugEvidence": {
     "runtimeBuggyExpression": "119.85",
     "runtimeExpectedExpression": "102.0"
+  },
+  "cliEvidence": {
+    "debugRequestPerPage": "50",
+    "debugRequestPath": "'/wines'",
+    "attachPythonDoubled": "20"
   }
 }
 ```
@@ -297,7 +343,7 @@ The correct total is 102.0, not 119.85.
 
 ## How To Make Agents Use It Naturally
 
-The project skill makes the CLI discoverable, but the agent still needs a workflow preference that says runtime bugs should be investigated with live runtime state when possible.
+The project skill makes the CLI discoverable, but the agent still needs a workflow preference that says runtime behavior should be investigated or verified with live runtime state when possible.
 
 For Claude Code, use `CLAUDE.md`. Anthropic documents `./CLAUDE.md` as project memory that Claude Code loads automatically.
 
@@ -324,10 +370,10 @@ npx -y github:illscience/vibe-debug agent-instructions --target codex
 The key instruction:
 
 ```text
-When a Python bug has a reproducible script, test, command, or request, prefer observing live runtime state before proposing a fix.
+When Python behavior can be exercised by a script, test, command, or local request, prefer observing live runtime state before guessing, proposing a fix, or claiming a feature works.
 ```
 
-The skill frontmatter is intentionally explicit so agents can load it when a Python bug has observable runtime state.
+The skill frontmatter is intentionally explicit so agents can load it when a Python task has observable runtime behavior and locals, stack frames, or expression evaluations would provide useful evidence.
 
 ## Development
 
@@ -346,7 +392,7 @@ Build a wheel:
 
 ## Safety
 
-`debug_evaluate` can execute code inside the target process. Treat it like running code in the debuggee. The server defaults to localhost debug adapter connections and cleans up launched sessions when the MCP server exits.
+`debug_evaluate` can execute code inside the target process. Treat it like running code in the debuggee. The server defaults to localhost debug adapter connections and cleans up launched sessions when the MCP server exits. Keep `debugpy` listeners bound to `127.0.0.1`; use tunnels for remote hosts instead of exposing debugger ports publicly.
 
 ## Roadmap
 

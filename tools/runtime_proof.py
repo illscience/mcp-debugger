@@ -6,6 +6,7 @@ import select
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -100,10 +101,38 @@ def line_with(marker: str) -> int:
     raise AssertionError(f"marker not found: {marker}")
 
 
+def line_with_file(path: Path, marker: str) -> int:
+    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if marker in line:
+            return index
+    raise AssertionError(f"marker not found in {path}: {marker}")
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def run_cli(args: list[str], timeout: float = 60.0) -> dict[str, Any]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    process = subprocess.run(
+        [sys.executable, "-m", "vibe_debug.cli", *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"CLI failed ({process.returncode}) for {args!r}\n"
+            f"stdout:\n{process.stdout}\n"
+            f"stderr:\n{process.stderr}"
+        )
+    return json.loads(process.stdout)
 
 
 def top_frame(client: MCPClient, session_id: str) -> dict[str, Any]:
@@ -307,6 +336,124 @@ def main() -> int:
                     attach_target.kill()
                     attach_target.wait(timeout=5)
 
+        with tempfile.TemporaryDirectory() as directory:
+            proof_root = Path(directory)
+
+            web_port = free_port()
+            web_target = proof_root / "web_probe.py"
+            web_target.write_text(
+                "\n".join(
+                    [
+                        "from urllib.parse import parse_qs",
+                        "from wsgiref.simple_server import make_server",
+                        "",
+                        "",
+                        "def app(environ, start_response):",
+                        "    path = environ['PATH_INFO']",
+                        "    raw_query = environ.get('QUERY_STRING', '')",
+                        "    params = parse_qs(raw_query)",
+                        "    per_page = min(max(int(params.get('per_page', ['20'])[0]), 1), 50)",
+                        "    status = '200 OK'",
+                        "    start_response(status, [('Content-Type', 'text/plain')])  # BREAK_HANDLER",
+                        "    return [f'{path} {per_page}'.encode()]",
+                        "",
+                        "",
+                        "if __name__ == '__main__':",
+                        f"    server = make_server('127.0.0.1', {web_port}, app)",
+                        "    server.serve_forever()",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            web_line = line_with_file(web_target, "BREAK_HANDLER")
+            debug_request = run_cli(
+                [
+                    "debug-request",
+                    str(web_target),
+                    "--url",
+                    f"http://127.0.0.1:{web_port}/wines?per_page=999",
+                    "--break",
+                    f"{web_target}:{web_line}",
+                    "--eval",
+                    "per_page",
+                    "--eval",
+                    "path",
+                    "--json",
+                    "--timeout",
+                    "20",
+                ]
+            )
+            assert debug_request["stopped"]["state"] == "stopped", debug_request
+            assert debug_request["stopped"]["function"] == "app", debug_request
+            debug_request_evals = {item["expression"]: item["result"] for item in debug_request["evaluations"]}
+            assert debug_request_evals["per_page"] == "50", debug_request
+            assert debug_request_evals["path"] == "'/wines'", debug_request
+
+            attach_cli_port = free_port()
+            attach_cli_target = proof_root / "attach_cli_probe.py"
+            attach_cli_target.write_text(
+                "\n".join(
+                    [
+                        "def main():",
+                        "    value = 10",
+                        "    doubled = value * 2",
+                        "    print(doubled)  # BREAK_ATTACH_CLI",
+                        "",
+                        "",
+                        "if __name__ == '__main__':",
+                        "    main()",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            attach_cli_line = line_with_file(attach_cli_target, "BREAK_ATTACH_CLI")
+            attach_cli_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "debugpy",
+                    "--listen",
+                    f"127.0.0.1:{attach_cli_port}",
+                    "--wait-for-client",
+                    str(attach_cli_target),
+                ],
+                cwd=proof_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                attach_cli = run_cli(
+                    [
+                        "attach-python",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(attach_cli_port),
+                        "--break",
+                        f"{attach_cli_target}:{attach_cli_line}",
+                        "--eval",
+                        "doubled",
+                        "--json",
+                        "--timeout",
+                        "20",
+                    ]
+                )
+                assert attach_cli["stopped"]["state"] == "stopped", attach_cli
+                assert attach_cli["stopped"]["function"] == "main", attach_cli
+                attach_cli_evals = {item["expression"]: item["result"] for item in attach_cli["evaluations"]}
+                assert attach_cli_evals["doubled"] == "20", attach_cli
+            finally:
+                if attach_cli_process.poll() is None:
+                    attach_cli_process.terminate()
+                    try:
+                        attach_cli_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        attach_cli_process.kill()
+                        attach_cli_process.wait(timeout=5)
+
         print(
             json.dumps(
                 {
@@ -321,15 +468,22 @@ def main() -> int:
                         "debug_continue to breakpoint",
                         "debug_step into",
                         "debug_scopes/debug_variables locals",
-            "debug_step out",
-            "debug_step over",
-            "debug_evaluate",
-            "debug_evaluate default top frame",
-            "debug_continue to exit",
-        ],
+                        "debug_step out",
+                        "debug_step over",
+                        "debug_evaluate",
+                        "debug_evaluate default top frame",
+                        "debug_continue to exit",
+                        "CLI debug-request",
+                        "CLI attach-python",
+                    ],
                     "bugEvidence": {
                         "runtimeBuggyExpression": buggy_value["result"],
                         "runtimeExpectedExpression": correct_value["result"],
+                    },
+                    "cliEvidence": {
+                        "debugRequestPerPage": debug_request_evals["per_page"],
+                        "debugRequestPath": debug_request_evals["path"],
+                        "attachPythonDoubled": attach_cli_evals["doubled"],
                     },
                 },
                 indent=2,

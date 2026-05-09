@@ -3,9 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from . import __version__
@@ -47,17 +52,29 @@ if __name__ == "__main__":
 
 CLI_DISCOVERY_SKILL = """---
 name: vibe-debug
-description: "Use when the user asks to debug, fix, explain, or diagnose a reproducible Python bug, failing Python script, failing Python test, wrong output, unexpected exception, or logic error where live runtime state could help. Trigger when a runnable Python repro exists or can be created and breakpoint locals, stack location, or expression evaluation would provide evidence. Do not use for non-Python bugs, pure style refactors, documentation-only tasks, or cases with no executable repro."
+description: "Use when the user asks to debug, fix, explain, verify, validate, or implement Python behavior where live runtime state could help. Trigger for reproducible Python bugs, failing Python tests/scripts, wrong output, unexpected exceptions, local web request behavior, or code-writing tasks where breakpoint locals, stack location, or expression evaluation would confirm what the code actually does. Use when a runnable Python command, script, test, or request exists or can be created. Do not use for non-Python bugs, pure style refactors, documentation-only tasks, or cases with no executable behavior to observe."
 ---
 
 # Vibe Debug CLI
 
-Use the `vibe-debug` CLI to observe live Python runtime state before proposing a fix.
+Use the `vibe-debug` CLI to observe live Python runtime state while debugging, verifying behavior, or writing code.
 
 ## Primary Command
 
 ```bash
 npx -y github:illscience/vibe-debug debug-python <script.py> --break <file.py>:<line> --json
+```
+
+For web apps with a local request that reproduces the behavior, prefer:
+
+```bash
+npx -y github:illscience/vibe-debug debug-request <server.py> --url http://127.0.0.1:5000/path --break <file.py>:<line> --json
+```
+
+For an already-running process that was started with `python -m debugpy --listen 127.0.0.1:<port> --wait-for-client ...`, use:
+
+```bash
+npx -y github:illscience/vibe-debug attach-python --port <port> --break <file.py>:<line> --json
 ```
 
 Pick a breakpoint at the suspicious calculation, branch, return, assertion, or exception site. If no breakpoint is known yet, run with `--stop-on-entry --json`, inspect the code, then run again with a more useful breakpoint.
@@ -68,16 +85,23 @@ Pick a breakpoint at the suspicious calculation, branch, return, assertion, or e
 - `--eval "<expr>"`: evaluate a side-effect-free expression in the paused frame. Repeat for multiple expressions.
 - `--arg "<value>"`: pass one argument to the target program. Repeat for multiple program arguments.
 - `--cwd <dir>`: run the target program from a specific working directory.
+- `--url "<local-url>"`: with `debug-request`, send a local HTTP request after the server starts.
+- `--trigger-url "<local-url>"`: with `attach-python`, send a local HTTP request after breakpoints are set.
 - `--locals-limit <n>`: cap the number of locals returned.
 - `--json`: return compact machine-readable output.
 
 ## Workflow
 
-1. Find or create the smallest Python command/script that reproduces the bug.
-2. Choose a breakpoint near the runtime behavior being diagnosed.
-3. Run `debug-python` with `--json`.
-4. Inspect `stopped`, `locals`, and `evaluations`.
-5. Cite observed runtime state in the final answer before proposing a fix.
+1. Find or create the smallest Python command, script, test, or request that exercises the behavior.
+2. Use `debug-python` for scripts/tests, `debug-request` for local web requests, or `attach-python` for an existing debugpy listener.
+3. Choose a breakpoint near the runtime behavior being diagnosed, verified, or implemented.
+4. Run the selected command with `--json`.
+5. Inspect `stopped`, `locals`, and `evaluations`.
+6. Use observed runtime state to explain the bug, confirm the behavior, or guide the code change.
+
+## Communication
+
+Always tell the user when and how you are using the debugger. Before running it, state the debugger mode, the target script/test/request or attach port, and the breakpoint you chose. After it stops, state the stopped file, line, function, and the observed locals or evaluations that matter. If you decide not to use the debugger for a runnable Python behavior task, briefly state why.
 
 ## Example
 
@@ -399,6 +423,170 @@ def _local_summaries(snapshot: dict[str, object]) -> list[dict[str, object]]:
     return summaries
 
 
+def _parse_env_assignment(value: str) -> tuple[str, str]:
+    key, separator, env_value = value.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError("environment values must look like KEY=VALUE")
+    return key, env_value
+
+
+def _parse_path_mapping(value: str) -> dict[str, str]:
+    local_root, separator, remote_root = value.partition("=")
+    if not separator or not local_root or not remote_root:
+        raise argparse.ArgumentTypeError("path mappings must look like LOCAL_ROOT=REMOTE_ROOT")
+    return {"localRoot": local_root, "remoteRoot": remote_root}
+
+
+def _env_dict(values: list[tuple[str, str]] | None) -> dict[str, str]:
+    return {key: value for key, value in values or []}
+
+
+def _evaluation_summaries(session: DebugSession, expressions: list[str]) -> list[dict[str, object]]:
+    evaluations: list[dict[str, object]] = []
+    for expression in expressions:
+        try:
+            result = session.evaluate(expression=expression)
+            evaluations.append(
+                {
+                    "expression": expression,
+                    "result": result.get("result"),
+                    "type": result.get("type"),
+                }
+            )
+        except Exception as exc:
+            evaluations.append(
+                {
+                    "expression": expression,
+                    "error": str(exc),
+                    "exceptionType": type(exc).__name__,
+                }
+            )
+    return evaluations
+
+
+def _stopped_summary(stopped: dict[str, object]) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "state": stopped.get("state"),
+        "event": stopped.get("event"),
+        "reason": stopped.get("stoppedReason"),
+    }
+    summary.update(_location_summary(stopped.get("location")))
+    return summary
+
+
+def _request_url(url: str, timeout: float) -> dict[str, object]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read(1024).decode("utf-8", errors="replace")
+            return {
+                "ok": True,
+                "url": url,
+                "status": response.status,
+                "bodyPreview": body,
+            }
+    except urllib.error.HTTPError as exc:
+        body = exc.read(1024).decode("utf-8", errors="replace")
+        return {
+            "ok": True,
+            "url": url,
+            "status": exc.code,
+            "bodyPreview": body,
+        }
+
+
+def _start_url_trigger(url: str, delay: float, timeout: float) -> tuple[threading.Thread, dict[str, object]]:
+    result: dict[str, object] = {"kind": "url", "state": "pending", "url": url}
+
+    def run() -> None:
+        if delay > 0:
+            time.sleep(delay)
+
+        deadline = time.monotonic() + timeout
+        attempts = 0
+        last_error: BaseException | None = None
+
+        while time.monotonic() < deadline:
+            attempts += 1
+            result.update({"state": "running", "attempts": attempts})
+            try:
+                request_timeout = min(1.0, max(0.1, deadline - time.monotonic()))
+                result.update(_request_url(url, timeout=request_timeout))
+                result["state"] = "completed"
+                return
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.1)
+
+        result.update(
+            {
+                "state": "failed",
+                "ok": False,
+                "attempts": attempts,
+                "error": str(last_error) if last_error else "trigger timed out",
+                "exceptionType": type(last_error).__name__ if last_error else "TimeoutError",
+            }
+        )
+
+    thread = threading.Thread(target=run, name="vibe-debug-url-trigger", daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _start_command_trigger(command: str, cwd: str | None, delay: float, timeout: float) -> tuple[threading.Thread, dict[str, object]]:
+    result: dict[str, object] = {"kind": "command", "state": "pending", "command": command}
+
+    def run() -> None:
+        if delay > 0:
+            time.sleep(delay)
+
+        result["state"] = "running"
+        try:
+            process = subprocess.run(
+                shlex.split(command),
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            result.update(
+                {
+                    "state": "completed",
+                    "ok": process.returncode == 0,
+                    "returncode": process.returncode,
+                    "stdoutPreview": process.stdout[:1024],
+                    "stderrPreview": process.stderr[:1024],
+                }
+            )
+        except Exception as exc:
+            result.update(
+                {
+                    "state": "failed",
+                    "ok": False,
+                    "error": str(exc),
+                    "exceptionType": type(exc).__name__,
+                }
+            )
+
+    thread = threading.Thread(target=run, name="vibe-debug-command-trigger", daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _collect_stopped_state(
+    session: DebugSession,
+    stopped: dict[str, object],
+    locals_limit: int,
+    expressions: list[str],
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    snapshot: dict[str, object] = {}
+    evaluations: list[dict[str, object]] = []
+    if stopped.get("state") == "stopped":
+        snapshot = session.top_frame_locals(limit=locals_limit)
+        evaluations = _evaluation_summaries(session, expressions)
+    return snapshot, evaluations
+
+
 def _debug_python_payload(args: argparse.Namespace) -> dict[str, object]:
     breakpoints = args.breakpoints or []
     stop_on_entry = bool(args.stop_on_entry or not breakpoints)
@@ -423,38 +611,14 @@ def _debug_python_payload(args: argparse.Namespace) -> dict[str, object]:
 
         if stopped.get("state") == "stopped":
             snapshot = session.top_frame_locals(limit=int(args.locals_limit))
-            for expression in args.evaluate or []:
-                try:
-                    result = session.evaluate(expression=expression)
-                    evaluations.append(
-                        {
-                            "expression": expression,
-                            "result": result.get("result"),
-                            "type": result.get("type"),
-                        }
-                    )
-                except Exception as exc:
-                    evaluations.append(
-                        {
-                            "expression": expression,
-                            "error": str(exc),
-                            "exceptionType": type(exc).__name__,
-                        }
-                    )
-
-        stopped_summary: dict[str, object] = {
-            "state": stopped.get("state"),
-            "event": stopped.get("event"),
-            "reason": stopped.get("stoppedReason"),
-        }
-        stopped_summary.update(_location_summary(stopped.get("location")))
+            evaluations = _evaluation_summaries(session, args.evaluate or [])
 
         return {
             "ok": True,
             "program": str(Path(args.program).resolve()),
             "cwd": str(Path(args.cwd or os.getcwd()).resolve()),
             "breakpoints": _breakpoint_summaries(breakpoint_results),
-            "stopped": stopped_summary,
+            "stopped": _stopped_summary(stopped),
             "locals": _local_summaries(snapshot),
             "evaluations": evaluations,
         }
@@ -531,6 +695,175 @@ def _debug_python(args: argparse.Namespace) -> int:
             )
         else:
             print(f"debug-python failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_debug_python_human(payload)
+    return 0
+
+
+def _debug_request_payload(args: argparse.Namespace) -> dict[str, object]:
+    breakpoints = args.breakpoints or []
+    session: DebugSession | None = None
+    trigger_thread: threading.Thread | None = None
+    trigger_result: dict[str, object] = {}
+    cwd = args.cwd or os.getcwd()
+
+    try:
+        session = DebugSession.launch(
+            program=args.program,
+            args=args.program_args or [],
+            cwd=args.cwd,
+            python=args.python,
+            env=_env_dict(args.env),
+            stop_on_entry=bool(args.stop_on_entry or not breakpoints),
+            timeout=float(args.timeout),
+        )
+        breakpoint_results = [
+            session.set_breakpoints(file=str(item["file"]), lines=[int(item["line"])], cwd=args.cwd)
+            for item in breakpoints
+        ]
+        trigger_thread, trigger_result = _start_url_trigger(
+            url=args.url,
+            delay=float(args.trigger_delay),
+            timeout=float(args.trigger_timeout or args.timeout),
+        )
+        stopped = session.continue_execution(timeout=float(args.timeout))
+        snapshot, evaluations = _collect_stopped_state(
+            session=session,
+            stopped=stopped,
+            locals_limit=int(args.locals_limit),
+            expressions=args.evaluate or [],
+        )
+        trigger_thread.join(timeout=0.2)
+
+        return {
+            "ok": True,
+            "mode": "debug-request",
+            "program": str(Path(args.program).resolve()),
+            "cwd": str(Path(cwd).resolve()),
+            "url": args.url,
+            "breakpoints": _breakpoint_summaries(breakpoint_results),
+            "stopped": _stopped_summary(stopped),
+            "locals": _local_summaries(snapshot),
+            "evaluations": evaluations,
+            "trigger": dict(trigger_result),
+        }
+    finally:
+        if session is not None:
+            try:
+                session.stop(terminate_debuggee=True)
+            except Exception:
+                pass
+
+
+def _debug_request(args: argparse.Namespace) -> int:
+    try:
+        payload = _debug_request_payload(args)
+    except Exception as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "mode": "debug-request",
+                        "error": str(exc),
+                        "exceptionType": type(exc).__name__,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"debug-request failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_debug_python_human(payload)
+    return 0
+
+
+def _attach_python_payload(args: argparse.Namespace) -> dict[str, object]:
+    session: DebugSession | None = None
+    trigger_thread: threading.Thread | None = None
+    trigger_result: dict[str, object] = {}
+
+    try:
+        session = DebugSession.attach(
+            host=args.host,
+            port=int(args.port),
+            timeout=float(args.timeout),
+            path_mappings=args.path_mappings,
+        )
+        breakpoint_results = [
+            session.set_breakpoints(file=str(item["file"]), lines=[int(item["line"])], cwd=args.cwd)
+            for item in args.breakpoints or []
+        ]
+
+        if args.trigger_url:
+            trigger_thread, trigger_result = _start_url_trigger(
+                url=args.trigger_url,
+                delay=float(args.trigger_delay),
+                timeout=float(args.trigger_timeout or args.timeout),
+            )
+        elif args.trigger_command:
+            trigger_thread, trigger_result = _start_command_trigger(
+                command=args.trigger_command,
+                cwd=args.cwd,
+                delay=float(args.trigger_delay),
+                timeout=float(args.trigger_timeout or args.timeout),
+            )
+
+        stopped = session.continue_execution(timeout=float(args.timeout))
+        snapshot, evaluations = _collect_stopped_state(
+            session=session,
+            stopped=stopped,
+            locals_limit=int(args.locals_limit),
+            expressions=args.evaluate or [],
+        )
+        if trigger_thread is not None:
+            trigger_thread.join(timeout=0.2)
+
+        return {
+            "ok": True,
+            "mode": "attach-python",
+            "host": args.host,
+            "port": int(args.port),
+            "breakpoints": _breakpoint_summaries(breakpoint_results),
+            "stopped": _stopped_summary(stopped),
+            "locals": _local_summaries(snapshot),
+            "evaluations": evaluations,
+            "trigger": dict(trigger_result) if trigger_result else None,
+        }
+    finally:
+        if session is not None:
+            try:
+                session.stop(terminate_debuggee=bool(args.terminate_debuggee))
+            except Exception:
+                pass
+
+
+def _attach_python(args: argparse.Namespace) -> int:
+    try:
+        payload = _attach_python_payload(args)
+    except Exception as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "mode": "attach-python",
+                        "error": str(exc),
+                        "exceptionType": type(exc).__name__,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"attach-python failed: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
@@ -852,6 +1185,85 @@ def main(argv: list[str] | None = None) -> int:
     debug_python.add_argument("--stop-on-entry", action="store_true")
     debug_python.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
     debug_python.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    debug_request = subparsers.add_parser(
+        "debug-request",
+        help="Launch a Python web app under the debugger, trigger a local URL, and print stopped-frame state.",
+    )
+    debug_request.add_argument("program", help="Python script that starts the local web server.")
+    debug_request.add_argument("--url", required=True, help="Local URL to request after the debuggee starts.")
+    debug_request.add_argument(
+        "--arg",
+        dest="program_args",
+        action="append",
+        default=[],
+        help="Argument passed to the server program.",
+    )
+    debug_request.add_argument(
+        "--break",
+        "-b",
+        dest="breakpoints",
+        action="append",
+        type=_parse_breakpoint,
+        default=[],
+        metavar="FILE:LINE",
+        help="Set a line breakpoint before triggering the URL. Repeat for multiple breakpoints.",
+    )
+    debug_request.add_argument("--cwd", help="Working directory for the target program.")
+    debug_request.add_argument("--python", help="Python executable for debugpy and the target.")
+    debug_request.add_argument(
+        "--env",
+        action="append",
+        type=_parse_env_assignment,
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable to add to the target process. Repeat for multiple values.",
+    )
+    debug_request.add_argument("--timeout", type=float, default=20.0)
+    debug_request.add_argument("--trigger-timeout", type=float, help="Timeout for the URL trigger. Defaults to --timeout.")
+    debug_request.add_argument("--trigger-delay", type=float, default=0.25)
+    debug_request.add_argument("--locals-limit", type=int, default=40)
+    debug_request.add_argument("--stop-on-entry", action="store_true")
+    debug_request.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
+    debug_request.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    attach_python = subparsers.add_parser(
+        "attach-python",
+        help="Attach to an existing debugpy listener, set breakpoints, optionally trigger work, and inspect state.",
+    )
+    attach_python.add_argument("--host", default="127.0.0.1", help="debugpy listener host.")
+    attach_python.add_argument("--port", type=int, required=True, help="debugpy listener port.")
+    attach_python.add_argument(
+        "--break",
+        "-b",
+        dest="breakpoints",
+        action="append",
+        type=_parse_breakpoint,
+        default=[],
+        metavar="FILE:LINE",
+        help="Set a line breakpoint before continuing. Repeat for multiple breakpoints.",
+    )
+    attach_python.add_argument("--cwd", help="Base directory for resolving relative breakpoint paths.")
+    attach_python.add_argument(
+        "--path-map",
+        dest="path_mappings",
+        action="append",
+        type=_parse_path_mapping,
+        default=[],
+        metavar="LOCAL_ROOT=REMOTE_ROOT",
+        help="Path mapping for remote/container attach. Repeat for multiple mappings.",
+    )
+    attach_python.add_argument("--trigger-url", help="URL to request after breakpoints are set.")
+    attach_python.add_argument("--trigger-command", help="Command to run after breakpoints are set.")
+    attach_python.add_argument("--trigger-timeout", type=float, help="Timeout for trigger work. Defaults to --timeout.")
+    attach_python.add_argument("--trigger-delay", type=float, default=0.0)
+    attach_python.add_argument("--timeout", type=float, default=20.0)
+    attach_python.add_argument("--locals-limit", type=int, default=40)
+    attach_python.add_argument("--eval", dest="evaluate", action="append", default=[], help="Evaluate expression at stop.")
+    attach_python.add_argument(
+        "--terminate-debuggee",
+        action="store_true",
+        help="Terminate the attached process on disconnect. By default attach detaches without terminating it.",
+    )
+    attach_python.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     subparsers.add_parser("claude-progress", help="Format Claude Code stream-json output for humans.")
 
     args = parser.parse_args(argv)
@@ -873,6 +1285,10 @@ def main(argv: list[str] | None = None) -> int:
         return _demo_project(args.target, args.directory, args.force)
     if args.command == "debug-python":
         return _debug_python(args)
+    if args.command == "debug-request":
+        return _debug_request(args)
+    if args.command == "attach-python":
+        return _attach_python(args)
     if args.command == "claude-progress":
         return _format_claude_stream(sys.stdin, sys.stdout)
     parser.error(f"unknown command: {args.command}")
