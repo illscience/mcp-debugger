@@ -125,6 +125,35 @@ Use `--json` when you want machine-readable output for an agent or script:
 npx -y github:illscience/vibe-debug debug-python ./buggy_invoice.py --break ./buggy_invoice.py:13 --eval "subtotal * (1 - rate)" --json
 ```
 
+For pytest failures, use `debug-pytest`. It launches pytest through the selected Python interpreter, so pytest comes from the target project environment rather than from `vibe-debug` itself:
+
+```bash
+npx -y github:illscience/vibe-debug debug-pytest examples/test_buggy_discount.py::test_gold --json
+```
+
+By default, `debug-pytest` stops on the failing `AssertionError` frame and returns the same stopped location, locals, and optional evaluations as `debug-python`, plus a `pytest` block:
+
+```json
+{
+  "ok": true,
+  "pytest": {
+    "test_id": "examples/test_buggy_discount.py::test_gold",
+    "outcome": "failed"
+  },
+  "exception": {
+    "name": "AssertionError"
+  }
+}
+```
+
+Useful pytest options:
+
+```bash
+npx -y github:illscience/vibe-debug debug-pytest examples/test_buggy_discount.py --break examples/test_buggy_discount.py:5
+npx -y github:illscience/vibe-debug debug-pytest examples/test_buggy_discount.py --pytest-arg -k --pytest-arg test_gold
+npx -y github:illscience/vibe-debug debug-pytest examples/test_buggy_discount.py::test_gold --no-break-on-failure --json
+```
+
 ## Status
 
 This is an alpha release. The first debugger backend is Python via [`debugpy`](https://github.com/microsoft/debugpy); the MCP server is designed to grow to TypeScript/Node and other language runtimes.
@@ -208,6 +237,7 @@ Workflow tools:
 
 - `debug_guidance`: returns instructions that tell agents when to use the debugger.
 - `debug_python_repro`: best first tool for a reproducible Python bug. It launches a Python script under `debugpy`, sets breakpoints, continues to the first stop, and returns stack plus top-frame locals.
+- `debug_pytest`: launches pytest under `debugpy`, stops on a failing assertion by default, and returns pytest outcome plus stopped-frame state.
 
 Debugger primitives:
 
@@ -236,7 +266,7 @@ If using the local venv:
 .venv/bin/python tools/runtime_proof.py
 ```
 
-The proof talks to the MCP server over stdio, launches `examples/buggy_discount.py` under `debugpy`, sets a breakpoint, continues to it, steps into and out of functions, inspects local variables, evaluates expressions in a paused frame, tests attach mode, and cleans up the session.
+The proof talks to the MCP server over stdio, launches `examples/buggy_discount.py` under `debugpy`, runs `examples/test_buggy_discount.py` with `debug_pytest`, sets a breakpoint, continues to it, steps into and out of functions, inspects local variables, evaluates expressions in a paused frame, tests attach mode, and cleans up the session.
 
 Expected output:
 
@@ -247,6 +277,7 @@ Expected output:
     "MCP initialize/tools/list",
     "debug_guidance",
     "debug_python_repro",
+    "debug_pytest",
     "debug_launch",
     "debug_attach",
     "debug_set_breakpoints",
@@ -350,7 +381,6 @@ Build a wheel:
 
 ## Roadmap
 
-- `debug_pytest_failure`: run a failing pytest test under the debugger automatically.
 - Breakpoints by function name, symbol, marker comment, or exception type.
 - Richer first-stop summaries with surrounding source and suggested next debugger actions.
 - Agent-optimized CLI commands, with MCP as a thin wrapper for clients that prefer tools over shell commands.

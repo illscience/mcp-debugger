@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import sys
+import time
 import traceback
+from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
@@ -70,6 +74,48 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     },
                 },
                 ["program"],
+            ),
+        },
+        {
+            "name": "debug_pytest",
+            "description": (
+                "Launch pytest under debugpy, optionally stop on AssertionError, and return pytest outcome, "
+                "stack, top-frame locals, and exception details."
+            ),
+            "inputSchema": _schema(
+                {
+                    "test_id": {"type": "string", "description": "Pytest node ID, such as tests/test_foo.py::test_bar."},
+                    "test_ids": {"type": "array", "items": {"type": "string"}},
+                    "pytest_args": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "cwd": {"type": "string", "description": "Working directory for pytest."},
+                    "python": {"type": "string", "description": "Python executable to use for debugpy and pytest."},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Environment variables to add to pytest.",
+                    },
+                    "breakpoints": {
+                        "type": "array",
+                        "description": "Breakpoints to set before pytest starts running.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {"type": "string"},
+                                "line": {"type": "integer"},
+                            },
+                            "required": ["file", "line"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "break_on_failure": {"type": "boolean", "default": True},
+                    "timeout": {"type": "number", "default": 30},
+                    "locals_limit": {"type": "integer", "default": 40},
+                    "keep_session": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Keep the session open after the first stop so the agent can step or inspect more.",
+                    },
+                },
             ),
         },
         {
@@ -215,12 +261,88 @@ def _tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _exception_summary(exception_info: dict[str, Any]) -> dict[str, Any]:
+    exception_id = exception_info.get("exceptionId")
+    details = exception_info.get("details")
+    message = exception_info.get("description")
+    stack_trace = None
+
+    if isinstance(details, dict):
+        detail_message = details.get("message")
+        if isinstance(detail_message, str) and detail_message:
+            message = detail_message
+        detail_stack = details.get("stackTrace")
+        if isinstance(detail_stack, str) and detail_stack:
+            stack_trace = detail_stack
+
+    name = str(exception_id) if exception_id is not None else ""
+    if "." in name:
+        name = name.rsplit(".", 1)[-1]
+
+    summary: dict[str, Any] = {
+        "name": name or "Exception",
+        "message": message if isinstance(message, str) else "",
+    }
+    if stack_trace:
+        summary["stackTrace"] = stack_trace
+    return summary
+
+
+def _pytest_outcome(stopped: dict[str, Any], exception: dict[str, Any] | None) -> str:
+    if exception and exception.get("name") == "AssertionError":
+        return "failed"
+
+    body = stopped.get("body")
+    exit_code = body.get("exitCode") if isinstance(body, dict) else None
+    if exit_code == 0:
+        return "passed"
+    if isinstance(exit_code, int):
+        return "failed"
+    if stopped.get("state") == "stopped":
+        return "stopped"
+    return str(stopped.get("state") or "unknown")
+
+
+def _pytest_args(values: list[str]) -> list[str]:
+    args: list[str] = []
+    for value in values:
+        args.extend(shlex.split(value))
+    return args
+
+
+def _skip_pytest_exception_stop(stopped: dict[str, Any], cwd: str | None) -> bool:
+    if stopped.get("state") != "stopped" or stopped.get("stoppedReason") != "exception":
+        return False
+
+    location = stopped.get("location")
+    if not isinstance(location, dict):
+        return False
+    source = location.get("source")
+    if not isinstance(source, dict):
+        return False
+    file_name = source.get("path")
+    if not isinstance(file_name, str) or not file_name:
+        return False
+
+    path = Path(file_name)
+    parts = set(path.parts)
+    if "site-packages" in parts or ".venv" in parts or "_pytest" in parts:
+        return True
+
+    try:
+        path.resolve().relative_to(Path(cwd or os.getcwd()).resolve())
+    except ValueError:
+        return True
+    return False
+
+
 class MCPDebuggerServer:
     def __init__(self) -> None:
         self.manager = DebugSessionManager()
         self.handlers: dict[str, ToolHandler] = {
             "debug_guidance": self._debug_guidance,
             "debug_python_repro": self._debug_python_repro,
+            "debug_pytest": self._debug_pytest,
             "debug_launch": self._debug_launch,
             "debug_attach": self._debug_attach,
             "debug_set_breakpoints": self._debug_set_breakpoints,
@@ -238,6 +360,7 @@ class MCPDebuggerServer:
             "guidance": AGENT_USAGE_GUIDANCE,
             "recommendedFirstTool": "debug_python_repro",
             "primitiveTools": [
+                "debug_pytest",
                 "debug_launch",
                 "debug_attach",
                 "debug_set_breakpoints",
@@ -385,6 +508,90 @@ class MCPDebuggerServer:
                 "Use debug_stop when finished with this session.",
             ],
         }
+
+    def _debug_pytest(self, args: dict[str, Any]) -> dict[str, Any]:
+        timeout = float(args.get("timeout", 30))
+        test_ids = list(args.get("test_ids") or [])
+        if args.get("test_id"):
+            test_ids.append(str(args["test_id"]))
+        if not test_ids:
+            raise ValueError("debug_pytest requires test_id or test_ids")
+
+        pytest_args = _pytest_args(args.get("pytest_args") or [])
+        start = time.monotonic()
+        launch = self.manager.launch_pytest(
+            test_ids=test_ids,
+            pytest_args=pytest_args,
+            cwd=args.get("cwd"),
+            python=args.get("python"),
+            env=args.get("env"),
+            timeout=timeout,
+        )
+        session_id = launch["sessionId"]
+        session = self.manager.get(session_id)
+        breakpoint_results: list[dict[str, Any]] = []
+        exception_breakpoints: dict[str, Any] = {}
+
+        if bool(args.get("break_on_failure", True)):
+            exception_breakpoints = session.set_exception_breakpoints(
+                exception_options=[
+                    {
+                        "path": [{"names": ["Python Exceptions"]}, {"names": ["AssertionError"]}],
+                        "breakMode": "always",
+                    }
+                ]
+            )
+
+        for item in args.get("breakpoints") or []:
+            breakpoint_results.append(
+                session.set_breakpoints(
+                    file=item["file"],
+                    lines=[int(item["line"])],
+                    cwd=args.get("cwd"),
+                )
+            )
+
+        stopped = session.continue_execution(timeout=timeout)
+        for _ in range(50):
+            if not _skip_pytest_exception_stop(stopped, args.get("cwd")):
+                break
+            stopped = session.continue_execution(timeout=timeout)
+        snapshot: dict[str, Any] = {}
+        exception: dict[str, Any] | None = None
+        if stopped.get("state") == "stopped":
+            snapshot = session.top_frame_locals(limit=int(args.get("locals_limit", 40)))
+            if stopped.get("stoppedReason") == "exception":
+                exception = _exception_summary(session.exception_info())
+
+        pytest = {
+            "rootdir": launch.get("cwd"),
+            "test_id": " ".join(test_ids),
+            "test_ids": test_ids,
+            "pytest_args": pytest_args,
+            "outcome": _pytest_outcome(stopped, exception),
+            "duration_seconds": round(time.monotonic() - start, 3),
+        }
+
+        if not bool(args.get("keep_session", True)):
+            self.manager.stop(session_id)
+
+        result: dict[str, Any] = {
+            "sessionId": session_id,
+            "launch": launch,
+            "pytest": pytest,
+            "breakpoints": breakpoint_results,
+            "exceptionBreakpoints": exception_breakpoints,
+            "stopped": stopped,
+            "snapshot": snapshot,
+            "nextActions": [
+                "Use debug_step to move over/into/out from the current line.",
+                "Use debug_variables to expand object variablesReference values.",
+                "Use debug_stop when finished with this session.",
+            ],
+        }
+        if exception is not None:
+            result["exception"] = exception
+        return result
 
     def _debug_attach(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.manager.attach(
